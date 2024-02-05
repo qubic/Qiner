@@ -2395,16 +2395,19 @@ struct Miner
                         {
                             neurons.input[DATA_LENGTH + inputNeuronIndex] = NEURON_VALUE_LIMIT;
                         }
-                        if (neurons.input[DATA_LENGTH + inputNeuronIndex] < -NEURON_VALUE_LIMIT)
+                        if (neurons.input[DATA_LENGTH + inputNeuronIndex] <= -NEURON_VALUE_LIMIT)
                         {
-                            neurons.input[DATA_LENGTH + inputNeuronIndex] = -NEURON_VALUE_LIMIT;
+                            neurons.input[DATA_LENGTH + inputNeuronIndex] = -NEURON_VALUE_LIMIT + 1;
                         }
                     }
                 }
             }
         }
 
-        memcpy(&neurons.output[0], &neurons.input[DATA_LENGTH + NUMBER_OF_INPUT_NEURONS], INFO_LENGTH * sizeof(neurons.input[0]));
+        for (unsigned int i = 0; i < INFO_LENGTH; i++)
+        {
+            neurons.output[i] = (neurons.input[DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + i] >= 0 ? 1 : -1);
+        }
 
         for (unsigned int tick = 0; tick < MAX_OUTPUT_DURATION; tick++)
         {
@@ -2420,9 +2423,9 @@ struct Miner
                         {
                             neurons.output[INFO_LENGTH + outputNeuronIndex] = NEURON_VALUE_LIMIT;
                         }
-                        if (neurons.output[INFO_LENGTH + outputNeuronIndex] < -NEURON_VALUE_LIMIT)
+                        if (neurons.output[INFO_LENGTH + outputNeuronIndex] <= -NEURON_VALUE_LIMIT)
                         {
-                            neurons.output[INFO_LENGTH + outputNeuronIndex] = -NEURON_VALUE_LIMIT;
+                            neurons.output[INFO_LENGTH + outputNeuronIndex] = -NEURON_VALUE_LIMIT + 1;
                         }
                     }
                 }
