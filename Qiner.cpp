@@ -2326,11 +2326,11 @@ struct Miner
         } neurons;
         struct
         {
-            /*char inputWeight[(NUMBER_OF_INPUT_NEURONS + INFO_LENGTH) * (DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + INFO_LENGTH)];
-            char outputWeight[(NUMBER_OF_OUTPUT_NEURONS + DATA_LENGTH) * (INFO_LENGTH + NUMBER_OF_OUTPUT_NEURONS + DATA_LENGTH)];*/
-            unsigned char inputLength[(NUMBER_OF_INPUT_NEURONS + INFO_LENGTH) * (DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + INFO_LENGTH)];
-            unsigned char outputLength[(NUMBER_OF_OUTPUT_NEURONS + DATA_LENGTH) * (INFO_LENGTH + NUMBER_OF_OUTPUT_NEURONS + DATA_LENGTH)];
+            char inputLength[(NUMBER_OF_INPUT_NEURONS + INFO_LENGTH) * (DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + INFO_LENGTH)];
+            char outputLength[(NUMBER_OF_OUTPUT_NEURONS + DATA_LENGTH) * (INFO_LENGTH + NUMBER_OF_OUTPUT_NEURONS + DATA_LENGTH)];
         } synapses;
+
+        memset(&neurons, 0, sizeof(neurons));
 
         _rdrand64_step((unsigned long long*) & nonce[0]);
         _rdrand64_step((unsigned long long*) & nonce[8]);
@@ -2342,13 +2342,9 @@ struct Miner
             for (unsigned int anotherInputNeuronIndex = 0; anotherInputNeuronIndex < DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + INFO_LENGTH; anotherInputNeuronIndex++)
             {
                 const unsigned int offset = inputNeuronIndex * (DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + INFO_LENGTH) + anotherInputNeuronIndex;
-                /*if (synapses.inputWeight[offset] == -128)
+                if (synapses.inputLength[offset] == -128)
                 {
-                    synapses.inputWeight[offset] = 0;
-                }*/
-                if (synapses.inputLength[offset] == 0)
-                {
-                    synapses.inputLength[offset] = 1;
+                    synapses.inputLength[offset] = 0;
                 }
             }
         }
@@ -2357,39 +2353,42 @@ struct Miner
             for (unsigned int anotherOutputNeuronIndex = 0; anotherOutputNeuronIndex < INFO_LENGTH + NUMBER_OF_OUTPUT_NEURONS + DATA_LENGTH; anotherOutputNeuronIndex++)
             {
                 const unsigned int offset = outputNeuronIndex * (INFO_LENGTH + NUMBER_OF_OUTPUT_NEURONS + DATA_LENGTH) + anotherOutputNeuronIndex;
-                /*if (synapses.outputWeight[offset] == -128)
+                if (synapses.outputLength[offset] == -128)
                 {
-                    synapses.outputWeight[offset] = 0;
-                }*/
-                if (synapses.outputLength[offset] == 0)
-                {
-                    synapses.outputLength[offset] = 1;
+                    synapses.outputLength[offset] = 0;
                 }
             }
         }
-        /*for (unsigned int inputNeuronIndex = 0; inputNeuronIndex < NUMBER_OF_INPUT_NEURONS + INFO_LENGTH; inputNeuronIndex++)
+        for (unsigned int inputNeuronIndex = 0; inputNeuronIndex < NUMBER_OF_INPUT_NEURONS + INFO_LENGTH; inputNeuronIndex++)
         {
-            synapses.inputWeight[inputNeuronIndex * (DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + INFO_LENGTH) + (DATA_LENGTH + inputNeuronIndex)] = 0;
+            synapses.inputLength[inputNeuronIndex * (DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + INFO_LENGTH) + (DATA_LENGTH + inputNeuronIndex)] = 0;
         }
         for (unsigned int outputNeuronIndex = 0; outputNeuronIndex < NUMBER_OF_OUTPUT_NEURONS + DATA_LENGTH; outputNeuronIndex++)
         {
-            synapses.outputWeight[outputNeuronIndex * (INFO_LENGTH + NUMBER_OF_OUTPUT_NEURONS + DATA_LENGTH) + (INFO_LENGTH + outputNeuronIndex)] = 0;
-        }*/
+            synapses.outputLength[outputNeuronIndex * (INFO_LENGTH + NUMBER_OF_OUTPUT_NEURONS + DATA_LENGTH) + (INFO_LENGTH + outputNeuronIndex)] = 0;
+        }
 
         memcpy(&neurons.input[0], &data, sizeof(data));
-        memset(&neurons.input[sizeof(data) / sizeof(neurons.input[0])], 0, sizeof(neurons) - sizeof(data));
 
-        for (unsigned int tick = 0; tick < MAX_INPUT_DURATION; tick++)
+        for (unsigned int tick = 1; tick <= MAX_INPUT_DURATION; tick++)
         {
             for (unsigned int inputNeuronIndex = 0; inputNeuronIndex < NUMBER_OF_INPUT_NEURONS + INFO_LENGTH; inputNeuronIndex++)
             {
                 for (unsigned int anotherInputNeuronIndex = 0; anotherInputNeuronIndex < DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + INFO_LENGTH; anotherInputNeuronIndex++)
                 {
                     const unsigned int offset = inputNeuronIndex * (DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + INFO_LENGTH) + anotherInputNeuronIndex;
-                    if (tick % synapses.inputLength[offset] == 0
-                        && DATA_LENGTH + inputNeuronIndex != anotherInputNeuronIndex)
+                    if (synapses.inputLength[offset] != 0
+                        && tick % synapses.inputLength[offset] == 0)
                     {
-                        neurons.input[DATA_LENGTH + inputNeuronIndex] -= neurons.input[anotherInputNeuronIndex]/* * synapses.inputWeight[inputNeuronIndex * (DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + INFO_LENGTH) + anotherInputNeuronIndex]*/;
+                        if (synapses.inputLength[offset] > 0)
+                        {
+                            neurons.input[DATA_LENGTH + inputNeuronIndex] += neurons.input[anotherInputNeuronIndex];
+                        }
+                        else
+                        {
+                            neurons.input[DATA_LENGTH + inputNeuronIndex] -= neurons.input[anotherInputNeuronIndex];
+                        }
+
                         if (neurons.input[DATA_LENGTH + inputNeuronIndex] > NEURON_VALUE_LIMIT)
                         {
                             neurons.input[DATA_LENGTH + inputNeuronIndex] = NEURON_VALUE_LIMIT;
@@ -2408,17 +2407,25 @@ struct Miner
             neurons.output[i] = (neurons.input[DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + i] >= 0 ? 1 : -1);
         }
 
-        for (unsigned int tick = 0; tick < MAX_OUTPUT_DURATION; tick++)
+        for (unsigned int tick = 1; tick <= MAX_OUTPUT_DURATION; tick++)
         {
             for (unsigned int outputNeuronIndex = 0; outputNeuronIndex < NUMBER_OF_OUTPUT_NEURONS + DATA_LENGTH; outputNeuronIndex++)
             {
                 for (unsigned int anotherOutputNeuronIndex = 0; anotherOutputNeuronIndex < INFO_LENGTH + NUMBER_OF_OUTPUT_NEURONS + DATA_LENGTH; anotherOutputNeuronIndex++)
                 {
                     const unsigned int offset = outputNeuronIndex * (INFO_LENGTH + NUMBER_OF_OUTPUT_NEURONS + DATA_LENGTH) + anotherOutputNeuronIndex;
-                    if (tick % synapses.outputLength[offset] == 0
-                        && INFO_LENGTH + outputNeuronIndex != anotherOutputNeuronIndex)
+                    if (synapses.outputLength[offset] != 0
+                        && tick % synapses.outputLength[offset] == 0)
                     {
-                        neurons.output[INFO_LENGTH + outputNeuronIndex] -= neurons.output[anotherOutputNeuronIndex]/* * synapses.outputWeight[outputNeuronIndex * (INFO_LENGTH + NUMBER_OF_OUTPUT_NEURONS + DATA_LENGTH) + anotherOutputNeuronIndex]*/;
+                        if (synapses.outputLength[offset] > 0)
+                        {
+                            neurons.output[INFO_LENGTH + outputNeuronIndex] += neurons.output[anotherOutputNeuronIndex];
+                        }
+                        else
+                        {
+                            neurons.output[INFO_LENGTH + outputNeuronIndex] -= neurons.output[anotherOutputNeuronIndex];
+                        }
+
                         if (neurons.output[INFO_LENGTH + outputNeuronIndex] > NEURON_VALUE_LIMIT)
                         {
                             neurons.output[INFO_LENGTH + outputNeuronIndex] = NEURON_VALUE_LIMIT;
