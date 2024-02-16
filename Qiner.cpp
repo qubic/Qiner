@@ -2370,7 +2370,7 @@ struct Miner
 
         memcpy(&neurons.input[0], &data, sizeof(data));
 
-        for (unsigned int tick = 1; tick <= MAX_INPUT_DURATION; tick++)
+        for (int tick = 1; tick <= MAX_INPUT_DURATION; tick++)
         {
             for (unsigned int inputNeuronIndex = 0; inputNeuronIndex < NUMBER_OF_INPUT_NEURONS + INFO_LENGTH; inputNeuronIndex++)
             {
@@ -2407,7 +2407,7 @@ struct Miner
             neurons.output[i] = (neurons.input[DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + i] >= 0 ? 1 : -1);
         }
 
-        for (unsigned int tick = 1; tick <= MAX_OUTPUT_DURATION; tick++)
+        for (int tick = 1; tick <= MAX_OUTPUT_DURATION; tick++)
         {
             for (unsigned int outputNeuronIndex = 0; outputNeuronIndex < NUMBER_OF_OUTPUT_NEURONS + DATA_LENGTH; outputNeuronIndex++)
             {
