@@ -2389,13 +2389,13 @@ struct Miner
                             neurons.input[DATA_LENGTH + inputNeuronIndex] -= neurons.input[anotherInputNeuronIndex];
                         }
 
-                        if (neurons.input[DATA_LENGTH + inputNeuronIndex] > NEURON_VALUE_LIMIT)
+                        if (neurons.input[DATA_LENGTH + inputNeuronIndex] >= NEURON_VALUE_LIMIT)
                         {
-                            neurons.input[DATA_LENGTH + inputNeuronIndex] = NEURON_VALUE_LIMIT;
+                            neurons.input[DATA_LENGTH + inputNeuronIndex] = NEURON_VALUE_LIMIT - 1;
                         }
-                        if (neurons.input[DATA_LENGTH + inputNeuronIndex] <= -NEURON_VALUE_LIMIT)
+                        if (neurons.input[DATA_LENGTH + inputNeuronIndex] < -NEURON_VALUE_LIMIT)
                         {
-                            neurons.input[DATA_LENGTH + inputNeuronIndex] = -NEURON_VALUE_LIMIT + 1;
+                            neurons.input[DATA_LENGTH + inputNeuronIndex] = -NEURON_VALUE_LIMIT;
                         }
                     }
                 }
@@ -2426,13 +2426,13 @@ struct Miner
                             neurons.output[INFO_LENGTH + outputNeuronIndex] -= neurons.output[anotherOutputNeuronIndex];
                         }
 
-                        if (neurons.output[INFO_LENGTH + outputNeuronIndex] > NEURON_VALUE_LIMIT)
+                        if (neurons.output[INFO_LENGTH + outputNeuronIndex] >= NEURON_VALUE_LIMIT)
                         {
-                            neurons.output[INFO_LENGTH + outputNeuronIndex] = NEURON_VALUE_LIMIT;
+                            neurons.output[INFO_LENGTH + outputNeuronIndex] = NEURON_VALUE_LIMIT - 1;
                         }
-                        if (neurons.output[INFO_LENGTH + outputNeuronIndex] <= -NEURON_VALUE_LIMIT)
+                        if (neurons.output[INFO_LENGTH + outputNeuronIndex] < -NEURON_VALUE_LIMIT)
                         {
-                            neurons.output[INFO_LENGTH + outputNeuronIndex] = -NEURON_VALUE_LIMIT + 1;
+                            neurons.output[INFO_LENGTH + outputNeuronIndex] = -NEURON_VALUE_LIMIT;
                         }
                     }
                 }
