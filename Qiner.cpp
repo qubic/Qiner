@@ -2282,14 +2282,14 @@ typedef struct
 
 struct Miner
 {
-    #define DATA_LENGTH 1024
-    #define INFO_LENGTH 512
+    #define DATA_LENGTH 256
+    #define INFO_LENGTH 128
     #define NUMBER_OF_INPUT_NEURONS 2048
     #define NUMBER_OF_OUTPUT_NEURONS 2048
     #define MAX_INPUT_DURATION 256
     #define MAX_OUTPUT_DURATION 256
-    #define NEURON_VALUE_LIMIT 549755813888
-    #define SOLUTION_THRESHOLD 50
+    #define NEURON_VALUE_LIMIT 1LL
+    #define SOLUTION_THRESHOLD 44
 
     long long data[DATA_LENGTH];
     unsigned char computorPublicKey[32];
@@ -2389,9 +2389,9 @@ struct Miner
                             neurons.input[DATA_LENGTH + inputNeuronIndex] -= neurons.input[anotherInputNeuronIndex];
                         }
 
-                        if (neurons.input[DATA_LENGTH + inputNeuronIndex] >= NEURON_VALUE_LIMIT)
+                        if (neurons.input[DATA_LENGTH + inputNeuronIndex] > NEURON_VALUE_LIMIT)
                         {
-                            neurons.input[DATA_LENGTH + inputNeuronIndex] = NEURON_VALUE_LIMIT - 1;
+                            neurons.input[DATA_LENGTH + inputNeuronIndex] = NEURON_VALUE_LIMIT;
                         }
                         if (neurons.input[DATA_LENGTH + inputNeuronIndex] < -NEURON_VALUE_LIMIT)
                         {
@@ -2426,9 +2426,9 @@ struct Miner
                             neurons.output[INFO_LENGTH + outputNeuronIndex] -= neurons.output[anotherOutputNeuronIndex];
                         }
 
-                        if (neurons.output[INFO_LENGTH + outputNeuronIndex] >= NEURON_VALUE_LIMIT)
+                        if (neurons.output[INFO_LENGTH + outputNeuronIndex] > NEURON_VALUE_LIMIT)
                         {
-                            neurons.output[INFO_LENGTH + outputNeuronIndex] = NEURON_VALUE_LIMIT - 1;
+                            neurons.output[INFO_LENGTH + outputNeuronIndex] = NEURON_VALUE_LIMIT;
                         }
                         if (neurons.output[INFO_LENGTH + outputNeuronIndex] < -NEURON_VALUE_LIMIT)
                         {
@@ -2532,7 +2532,7 @@ static bool getPublicKeyFromIdentity(const unsigned char* id, unsigned char* pub
     unsigned char publicKeyBuffer[32];
     for (int i = 0; i < 4; i++)
     {
-        *((unsigned long long*)&publicKeyBuffer[i << 3]) = 0;
+        *((unsigned long long*) & publicKeyBuffer[i << 3]) = 0;
         for (int j = 14; j-- > 0; )
         {
             if (id[i * 14 + j] < 'A' || id[i * 14 + j] > 'Z')
@@ -2548,8 +2548,27 @@ static bool getPublicKeyFromIdentity(const unsigned char* id, unsigned char* pub
     return true;
 }
 
+static DWORD WINAPI testThreadProc(LPVOID)
+{
+    Miner miner;
+    miner.initialize();
+    unsigned long long start = GetTickCount64();
+    for (int i = 0; i < 10; i++)
+    {
+        unsigned char nonce[32];
+        miner.findSolution(nonce);
+    }
+    printf("%d\n", (GetTickCount64() - start) / 10);
+
+    return 0;
+}
+
 int main(int argc, char* argv[])
 {
+    CreateThread(NULL, 103316480, testThreadProc, 0, 0, NULL);
+    Sleep(1000);
+    return 0;
+
     if (argc < 3)
     {
         printf("Usage:   Qiner IP-address Id [Number of threads]\n");
