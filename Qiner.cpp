@@ -2548,27 +2548,8 @@ static bool getPublicKeyFromIdentity(const unsigned char* id, unsigned char* pub
     return true;
 }
 
-static DWORD WINAPI testThreadProc(LPVOID)
-{
-    Miner miner;
-    miner.initialize();
-    unsigned long long start = GetTickCount64();
-    for (int i = 0; i < 10; i++)
-    {
-        unsigned char nonce[32];
-        miner.findSolution(nonce);
-    }
-    printf("%d\n", (GetTickCount64() - start) / 10);
-
-    return 0;
-}
-
 int main(int argc, char* argv[])
 {
-    CreateThread(NULL, 103316480, testThreadProc, 0, 0, NULL);
-    Sleep(1000);
-    return 0;
-
     if (argc < 3)
     {
         printf("Usage:   Qiner IP-address Id [Number of threads]\n");
