@@ -2324,6 +2324,7 @@ struct Miner
         {
             char inputLength[(NUMBER_OF_INPUT_NEURONS + DATA_LENGTH) * (DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + DATA_LENGTH)];
         } synapses;
+        long long neuronBufferInput[DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + DATA_LENGTH];
 
         memset(&neurons, 0, sizeof(neurons));
 
@@ -2352,6 +2353,7 @@ struct Miner
 
         for (int tick = 1; tick <= MAX_INPUT_DURATION; tick++)
         {
+            memcpy(&neuronBufferInput[0], &neurons.input[0], sizeof(neurons.input));
             for (unsigned int inputNeuronIndex = 0; inputNeuronIndex < NUMBER_OF_INPUT_NEURONS + DATA_LENGTH; inputNeuronIndex++)
             {
                 for (unsigned int anotherInputNeuronIndex = 0; anotherInputNeuronIndex < DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + DATA_LENGTH; anotherInputNeuronIndex++)
@@ -2362,11 +2364,11 @@ struct Miner
                     {
                         if (synapses.inputLength[offset] > 0)
                         {
-                            neurons.input[DATA_LENGTH + inputNeuronIndex] += neurons.input[anotherInputNeuronIndex];
+                            neurons.input[DATA_LENGTH + inputNeuronIndex] += neuronBufferInput[anotherInputNeuronIndex];
                         }
                         else
                         {
-                            neurons.input[DATA_LENGTH + inputNeuronIndex] -= neurons.input[anotherInputNeuronIndex];
+                            neurons.input[DATA_LENGTH + inputNeuronIndex] -= neuronBufferInput[anotherInputNeuronIndex];
                         }
 
                         if (neurons.input[DATA_LENGTH + inputNeuronIndex] > NEURON_VALUE_LIMIT)
