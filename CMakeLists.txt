@@ -17,8 +17,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx512f  -mrdrnd -mbmi")
         set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mavx512f  -mrdrnd -mbmi")
     else()
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx2")
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mavx2")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx2 -mrdrnd -mbmi")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mavx2 -mrdrnd -mbmi")
     endif()
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     if(ENABLE_AVX512)
@@ -33,7 +33,7 @@ else()
 endif()
 
 # Main executable
-add_executable(${PROJECT_NAME} Qiner.cpp)
+add_executable(${PROJECT_NAME} src/Qiner.cpp)
 
 # Linking
 if(WIN32)
