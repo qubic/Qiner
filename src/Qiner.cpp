@@ -2222,9 +2222,8 @@ struct RequestResponseHeader
 {
 private:
     unsigned char _size[3];
-    unsigned char _protocol;
-    unsigned char _dejavu[3];
     unsigned char _type;
+    unsigned int _dejavu;
 
 public:
     inline unsigned int size()
@@ -2239,42 +2238,37 @@ public:
         _size[2] = (unsigned char)(size >> 16);
     }
 
-    inline unsigned char protocol()
+    inline bool isDejavuZero() const
     {
-        return _protocol;
-    }
-
-    inline void setProtocol()
-    {
-        _protocol = 0;
-    }
-
-    inline bool isDejavuZero()
-    {
-        return !(_dejavu[0] | _dejavu[1] | _dejavu[2]);
+        return !_dejavu;
     }
 
     inline void zeroDejavu()
     {
-        _dejavu[0] = 0;
-        _dejavu[1] = 0;
-        _dejavu[2] = 0;
+        _dejavu = 0;
+    }
+
+
+    inline unsigned int dejavu() const
+    {
+        return _dejavu;
+    }
+
+    inline void setDejavu(unsigned int dejavu)
+    {
+        _dejavu = dejavu;
     }
 
     inline void randomizeDejavu()
     {
-        unsigned int random;
-        _rdrand32_step(&random);
-        if (!random)
+        _rdrand32_step(&_dejavu);
+        if (!_dejavu)
         {
-            random = 1;
+            _dejavu = 1;
         }
-        _dejavu[0] = (unsigned char)random;
-        _dejavu[1] = (unsigned char)(random >> 8);
-        _dejavu[2] = (unsigned char)(random >> 16);
     }
 
-    inline unsigned char type()
+    inline unsigned char type() const
     {
         return _type;
     }
@@ -2704,7 +2698,6 @@ int main(int argc, char* argv[])
                         } packet;
 
                         packet.header.setSize(sizeof(packet));
-                        packet.header.setProtocol();
                         packet.header.zeroDejavu();
                         packet.header.setType(BROADCAST_MESSAGE);
 
