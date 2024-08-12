@@ -1104,7 +1104,7 @@ static void KangarooTwelve_F_Absorb(KangarooTwelve_F* instance, unsigned char* d
     }
 }
 
-static void KangarooTwelve(unsigned char* input, unsigned int inputByteLen, unsigned char* output, unsigned int outputByteLen)
+static void KangarooTwelve(unsigned char* input, unsigned int inputByteLen, unsigned char* output, unsigned long long outputByteLen)
 {
     KangarooTwelve_F queueNode;
     KangarooTwelve_F finalNode;
@@ -2288,11 +2288,11 @@ typedef struct
     unsigned char gammingNonce[32];
 } Message;
 
-#define DATA_LENGTH 256
-#define NUMBER_OF_HIDDEN_NEURONS 32768
-#define NUMBER_OF_NEIGHBOR_NEURONS 8192
-#define MAX_DURATION 256
-#define SOLUTION_THRESHOLD 44
+static constexpr unsigned long long DATA_LENGTH = 256;
+static constexpr unsigned long long NUMBER_OF_HIDDEN_NEURONS = 32768;
+static constexpr unsigned long long NUMBER_OF_NEIGHBOR_NEURONS = 8192;
+static constexpr unsigned long long MAX_DURATION = 256;
+static constexpr unsigned int SOLUTION_THRESHOLD = 44;
 
 struct Miner
 {
@@ -2304,7 +2304,7 @@ struct Miner
         unsigned char randomSeed[32];
         memset(randomSeed, 0, sizeof(randomSeed));
         random(randomSeed, randomSeed, (unsigned char*)data, sizeof(data));
-        for (unsigned int i = 0; i < DATA_LENGTH; i++)
+        for (unsigned long long i = 0; i < DATA_LENGTH; i++)
         {
             data[i] = (data[i] >= 0 ? 1 : -1);
         }
@@ -2340,7 +2340,7 @@ struct Miner
         _rdrand64_step((unsigned long long*) & nonce[16]);
         _rdrand64_step((unsigned long long*) & nonce[24]);
         random(computorPublicKey, nonce, (unsigned char*)&synapses, sizeof(synapses));
-        for (unsigned long synapseIndex = 0; synapseIndex < (NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH) * NUMBER_OF_NEIGHBOR_NEURONS; synapseIndex++)
+        for (unsigned long long synapseIndex = 0; synapseIndex < (NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH) * NUMBER_OF_NEIGHBOR_NEURONS; synapseIndex++)
         {
             if (synapses.inputLength[synapseIndex] == -128)
             {
@@ -2350,18 +2350,18 @@ struct Miner
 
         memcpy(&neurons.input[0], &data, sizeof(data));
 
-        for (int tick = 1; tick <= MAX_DURATION; tick++)
+        for (unsigned long long tick = 1; tick <= MAX_DURATION; tick++)
         {
             memcpy(&neuronBufferInput[0], &neurons.input[0], sizeof(neurons.input));
-            for (unsigned int inputNeuronIndex = 0; inputNeuronIndex < NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH; inputNeuronIndex++)
+            for (unsigned long long inputNeuronIndex = 0; inputNeuronIndex < NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH; inputNeuronIndex++)
             {
-                for (unsigned int i = 0; i < NUMBER_OF_NEIGHBOR_NEURONS; i++)
+                for (unsigned long long i = 0; i < NUMBER_OF_NEIGHBOR_NEURONS; i++)
                 {
-                    const unsigned int offset = inputNeuronIndex * NUMBER_OF_NEIGHBOR_NEURONS + i;
+                    const unsigned long long offset = inputNeuronIndex * NUMBER_OF_NEIGHBOR_NEURONS + i;
                     if (synapses.inputLength[offset] != 0
                         && tick % synapses.inputLength[offset] == 0)
                     {
-                        unsigned int anotherInputNeuronIndex = (inputNeuronIndex + 1 + i) % (DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH);
+                        unsigned long long anotherInputNeuronIndex = (inputNeuronIndex + 1 + i) % (DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH);
                         if (synapses.inputLength[offset] > 0)
                         {
                             neurons.input[DATA_LENGTH + inputNeuronIndex] += neuronBufferInput[anotherInputNeuronIndex];
@@ -2386,7 +2386,7 @@ struct Miner
 
         unsigned int score = 0;
 
-        for (unsigned int i = 0; i < DATA_LENGTH; i++)
+        for (unsigned long long i = 0; i < DATA_LENGTH; i++)
         {
             if (data[i] == neurons.input[DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + i])
             {
@@ -2451,11 +2451,11 @@ int getSystemProcs()
     return 0;
 }
 
-template<int num>
-bool isZeros(unsigned char* value)
+template<unsigned long long num>
+bool isZeros(const unsigned char* value)
 {
     bool allZeros = true;
-    for (int i = 0; i < num; ++i)
+    for (unsigned long long i = 0; i < num; ++i)
     {
         if (value[i] != 0)
         {
