@@ -1,22 +1,36 @@
-#define AVX512 0
 #define PORT 21841
 #define EPOCH 0
 
-#include <intrin.h>
-#include <stdio.h>
-#include <string.h>
-#include <winsock2.h>
+#include <chrono>
+#include <thread>
+#include <mutex>
+#include <cstdio>
+#include <cstring>
+#include <array>
+#include <queue>
 
-#pragma comment (lib, "ws2_32.lib")
+#ifdef _MSC_VER
+    #include <intrin.h>
+    #include <winsock2.h>
+    #pragma comment (lib, "ws2_32.lib")
 
-#define ACQUIRE(lock) while (_InterlockedCompareExchange8(&lock, 1, 0)) _mm_pause()
-#define RELEASE(lock) lock = 0
-#define EQUAL(a, b) (_mm256_movemask_epi8(_mm256_cmpeq_epi64(a, b)) == 0xFFFFFFFF)
-
-#if defined(_MSC_VER)
-#define ROL64(a, offset) _rotl64(a, offset)
+    #define ROL64(a, offset) _rotl64(a, offset)
 #else
-#define ROL64(a, offset) ((((unsigned long long)a) << offset) ^ (((unsigned long long)a) >> (64 - offset)))
+    #include <signal.h>
+    #include <immintrin.h>
+    #include <vector>
+    #include <arpa/inet.h>
+    #include <sys/socket.h>
+
+    #if defined(__GNUC__) && !defined(__clang__)
+        #define _andn_u64(a, b) __andn_u64(a, b)
+    #endif
+
+    #define ROL64(a, offset) ((((unsigned long long)a) << offset) ^ (((unsigned long long)a) >> (64 - offset)))
+#endif
+
+#if ENABLE_AVX512 || defined(__AVX512F__)
+#define AVX512 1
 #endif
 
 #if AVX512
@@ -2187,8 +2201,8 @@ static void KangarooTwelve64To32(unsigned char* input, unsigned char* output)
 void random(unsigned char* publicKey, unsigned char* nonce, unsigned char* output, unsigned int outputSize)
 {
     unsigned char state[200];
-    *((__m256i*) & state[0]) = *((__m256i*)publicKey);
-    *((__m256i*) & state[32]) = *((__m256i*)nonce);
+    memcpy(&state[0], publicKey, 32);
+    memcpy(&state[32], nonce, 32);
     memset(&state[64], 0, sizeof(state) - 64);
 
     for (unsigned int i = 0; i < outputSize / sizeof(state); i++)
@@ -2208,9 +2222,8 @@ struct RequestResponseHeader
 {
 private:
     unsigned char _size[3];
-    unsigned char _protocol;
-    unsigned char _dejavu[3];
     unsigned char _type;
+    unsigned int _dejavu;
 
 public:
     inline unsigned int size()
@@ -2225,42 +2238,37 @@ public:
         _size[2] = (unsigned char)(size >> 16);
     }
 
-    inline unsigned char protocol()
+    inline bool isDejavuZero() const
     {
-        return _protocol;
-    }
-
-    inline void setProtocol()
-    {
-        _protocol = 0;
-    }
-
-    inline bool isDejavuZero()
-    {
-        return !(_dejavu[0] | _dejavu[1] | _dejavu[2]);
+        return !_dejavu;
     }
 
     inline void zeroDejavu()
     {
-        _dejavu[0] = 0;
-        _dejavu[1] = 0;
-        _dejavu[2] = 0;
+        _dejavu = 0;
+    }
+
+
+    inline unsigned int dejavu() const
+    {
+        return _dejavu;
+    }
+
+    inline void setDejavu(unsigned int dejavu)
+    {
+        _dejavu = dejavu;
     }
 
     inline void randomizeDejavu()
     {
-        unsigned int random;
-        _rdrand32_step(&random);
-        if (!random)
+        _rdrand32_step(&_dejavu);
+        if (!_dejavu)
         {
-            random = 1;
+            _dejavu = 1;
         }
-        _dejavu[0] = (unsigned char)random;
-        _dejavu[1] = (unsigned char)(random >> 8);
-        _dejavu[2] = (unsigned char)(random >> 16);
     }
 
-    inline unsigned char type()
+    inline unsigned char type() const
     {
         return _type;
     }
@@ -2280,14 +2288,14 @@ typedef struct
     unsigned char gammingNonce[32];
 } Message;
 
+#define DATA_LENGTH 256
+#define NUMBER_OF_INPUT_NEURONS 16384
+#define MAX_INPUT_DURATION 4096
+#define NEURON_VALUE_LIMIT 1LL
+#define SOLUTION_THRESHOLD 44
+
 struct Miner
 {
-    #define DATA_LENGTH 256
-    #define NUMBER_OF_INPUT_NEURONS 16384
-    #define MAX_INPUT_DURATION 256
-    #define NEURON_VALUE_LIMIT 1LL
-    #define SOLUTION_THRESHOLD 44
-
     long long data[DATA_LENGTH];
     unsigned char computorPublicKey[32];
 
@@ -2306,28 +2314,27 @@ struct Miner
 
     void getComputorPublicKey(unsigned char computorPublicKey[32])
     {
-        *((__m256i*)computorPublicKey) = *((__m256i*)this->computorPublicKey);
+        memcpy(computorPublicKey, this->computorPublicKey, sizeof(this->computorPublicKey));
     }
 
     void setComputorPublicKey(unsigned char computorPublicKey[32])
     {
-        *((__m256i*)this->computorPublicKey) = *((__m256i*)computorPublicKey);
+        memcpy(this->computorPublicKey, computorPublicKey, sizeof(this->computorPublicKey));
     }
+
+    struct
+    {
+        long long input[DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + DATA_LENGTH];
+    } neurons;
+    struct
+    {
+        char inputLength[(NUMBER_OF_INPUT_NEURONS + DATA_LENGTH) * (DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + DATA_LENGTH)];
+    } synapses;
+    long long neuronBufferInput[DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + DATA_LENGTH];
 
     bool findSolution(unsigned char nonce[32])
     {
-        struct
-        {
-            long long input[DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + DATA_LENGTH];
-        } neurons;
-        struct
-        {
-            char inputLength[(NUMBER_OF_INPUT_NEURONS + DATA_LENGTH) * (DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + DATA_LENGTH)];
-        } synapses;
-        long long neuronBufferInput[DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + DATA_LENGTH];
-
         memset(&neurons, 0, sizeof(neurons));
-
         _rdrand64_step((unsigned long long*) & nonce[0]);
         _rdrand64_step((unsigned long long*) & nonce[8]);
         _rdrand64_step((unsigned long long*) & nonce[16]);
@@ -2398,79 +2405,211 @@ struct Miner
     }
 };
 
-const static __m256i ZERO = _mm256_setzero_si256();
-
-static volatile char state = 0;
+static std::atomic<char> state(0);
 
 static unsigned char computorPublicKey[32];
-static unsigned char nonce[32] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-static volatile long long numberOfMiningIterations = 0;
-static unsigned int numberOfFoundSolutions = 0;
+static std::atomic<long long> numberOfMiningIterations(0);
+static std::atomic<unsigned int> numberOfFoundSolutions(0);
+static std::queue<std::array<unsigned char, 32>> foundNonce;
+std::mutex foundNonceLock;
 
+
+#ifdef _MSC_VER
 static BOOL WINAPI ctrlCHandlerRoutine(DWORD dwCtrlType)
 {
-    state = 1;
-
+    if (!state)
+    {
+        state = 1;
+    }
+    else // User force exit quickly
+    {
+        std::exit(1);
+    }
     return TRUE;
 }
-
-static DWORD WINAPI miningThreadProc(LPVOID)
+#else
+void ctrlCHandlerRoutine(int signum)
 {
-    Miner miner;
-    miner.initialize();
-    miner.setComputorPublicKey(computorPublicKey);
-
-    unsigned char nonce[32];
-    while (!state)
+    if (!state)
     {
-        if (miner.findSolution(nonce))
-        {
-            while (!EQUAL(*((__m256i*)::nonce), ZERO))
-            {
-                Sleep(1);
-            }
-            *((__m256i*)::nonce) = *((__m256i*)nonce);
-            numberOfFoundSolutions++;
-        }
-
-        _InterlockedIncrement64(&numberOfMiningIterations);
+        state = 1;
     }
+    else // User force exit quickly
+    {
+        std::exit(1);
+    }
+}
+#endif
 
+void consoleCtrlHandler()
+{
+#ifdef _MSC_VER
+    SetConsoleCtrlHandler(ctrlCHandlerRoutine, TRUE);
+#else
+    signal(SIGINT, ctrlCHandlerRoutine);
+#endif
+}
+
+int getSystemProcs()
+{
+#ifdef _MSC_VER
+#else
+#endif
     return 0;
 }
 
-static bool sendData(SOCKET serverSocket, char* buffer, unsigned int size)
+template<int num>
+bool isZeros(unsigned char* value)
 {
-    while (size)
+    bool allZeros = true;
+    for (int i = 0; i < num; ++i)
     {
-        int numberOfBytes;
-        if ((numberOfBytes = send(serverSocket, buffer, size, 0)) <= 0)
+        if (value[i] != 0)
         {
             return false;
         }
-        buffer += numberOfBytes;
-        size -= numberOfBytes;
     }
-
     return true;
 }
 
-static bool receiveData(SOCKET serverSocket, char* buffer, unsigned int size)
+int miningThreadProc()
 {
-    const unsigned long long beginningTime = GetTickCount64();
-    while (size && GetTickCount64() - beginningTime <= 2000)
+    static Miner miner;
+    miner.initialize();
+    miner.setComputorPublicKey(computorPublicKey);
+
+    std::array<unsigned char, 32> nonce;
+    while (!state)
     {
-        int numberOfBytes;
-        if ((numberOfBytes = recv(serverSocket, buffer, size, 0)) <= 0)
+        if (miner.findSolution(nonce.data()))
         {
+            {
+                std::lock_guard<std::mutex> guard(foundNonceLock);
+                foundNonce.push(nonce);
+            }
+            numberOfFoundSolutions++;
+        }
+
+        numberOfMiningIterations++;
+    }
+    return 0;
+}
+
+struct ServerSocket
+{
+#ifdef _MSC_VER
+    ServerSocket()
+    {
+        WSADATA wsaData;
+        WSAStartup(MAKEWORD(2, 2), &wsaData);
+    }
+
+    ~ServerSocket()
+    {
+        WSACleanup();
+    }
+
+    void closeConnection()
+    {
+        closesocket(serverSocket);
+    }
+
+    bool establishConnection(char* address)
+    {
+        serverSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (serverSocket == INVALID_SOCKET)
+        {
+            printf("Fail to create a socket (%d)!\n", WSAGetLastError());
             return false;
         }
-        buffer += numberOfBytes;
-        size -= numberOfBytes;
+
+        sockaddr_in addr;
+        ZeroMemory(&addr, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(PORT);
+        sscanf_s(address, "%hhu.%hhu.%hhu.%hhu", &addr.sin_addr.S_un.S_un_b.s_b1, &addr.sin_addr.S_un.S_un_b.s_b2, &addr.sin_addr.S_un.S_un_b.s_b3, &addr.sin_addr.S_un.S_un_b.s_b4);
+        if (connect(serverSocket, (const sockaddr*)&addr, sizeof(addr)))
+        {
+            printf("Fail to connect to %d.%d.%d.%d (%d)!\n", addr.sin_addr.S_un.S_un_b.s_b1, addr.sin_addr.S_un.S_un_b.s_b2, addr.sin_addr.S_un.S_un_b.s_b3, addr.sin_addr.S_un.S_un_b.s_b4, WSAGetLastError());
+            closeConnection();
+            return false;
+        }
+
+        return true;
     }
 
-    return true;
-}
+    SOCKET serverSocket;
+#else
+    void closeConnection()
+    {
+        close(serverSocket);
+    }
+    bool establishConnection(char* address)
+    {
+        serverSocket = socket(AF_INET, SOCK_STREAM, 0);
+        if (serverSocket == -1)
+        {
+            printf("Fail to create a socket (%d)!\n", errno);
+            return false;
+        }
+
+        sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(PORT);
+        if (inet_pton(AF_INET, address, &addr.sin_addr) <= 0)
+        {
+            printf("Invalid address/ Address not supported (%s)\n", address);
+            return false;
+        }
+
+        if (connect(serverSocket, (struct sockaddr*)&addr, sizeof(addr)) < 0)
+         {
+            printf("Fail to connect to %s (%d)\n", address ,errno);
+            closeConnection();
+            return false;
+        }
+
+        return true;
+    }
+
+    int serverSocket;
+#endif
+
+    bool sendData(char* buffer, unsigned int size)
+    {
+        while (size)
+        {
+            int numberOfBytes;
+            if ((numberOfBytes = send(serverSocket, buffer, size, 0)) <= 0)
+            {
+                return false;
+            }
+            buffer += numberOfBytes;
+            size -= numberOfBytes;
+        }
+
+        return true;
+    }
+    bool receiveData(char* buffer, unsigned int size)
+    {
+        const auto beginningTime = std::chrono::steady_clock::now();
+        unsigned long long deltaTime = 0;
+        while (size && deltaTime <= 2000)
+        {
+            int numberOfBytes;
+            if ((numberOfBytes = recv(serverSocket, buffer, size, 0)) <= 0)
+            {
+                return false;
+            }
+            buffer += numberOfBytes;
+            size -= numberOfBytes;
+            deltaTime = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - beginningTime).count();
+        }
+
+        return true;
+    }
+};
 
 static bool getPublicKeyFromIdentity(const unsigned char* id, unsigned char* publicKey)
 {
@@ -2488,13 +2627,15 @@ static bool getPublicKeyFromIdentity(const unsigned char* id, unsigned char* pub
             *((unsigned long long*) & publicKeyBuffer[i << 3]) = *((unsigned long long*) & publicKeyBuffer[i << 3]) * 26 + (id[i * 14 + j] - 'A');
         }
     }
-    *((__m256i*)publicKey) = *((__m256i*)publicKeyBuffer);
+    memcpy(publicKey, publicKeyBuffer, 32);
 
     return true;
 }
 
 int main(int argc, char* argv[])
 {
+    std::vector<std::thread> miningThreads;
+
     if (argc < 3)
     {
         printf("Usage:   Qiner IP-address Id [Number of threads]\n");
@@ -2503,7 +2644,7 @@ int main(int argc, char* argv[])
     {
         printf("Qiner %d.0 is launched.\n", EPOCH);
 
-        SetConsoleCtrlHandler(ctrlCHandlerRoutine, TRUE);
+        consoleCtrlHandler();
 
         if (!getPublicKeyFromIdentity((const unsigned char*)argv[2], computorPublicKey))
         {
@@ -2514,118 +2655,121 @@ int main(int argc, char* argv[])
             unsigned int numberOfThreads;
             if (argc < 4)
             {
-                SYSTEM_INFO systemInfo;
-                GetSystemInfo(&systemInfo);
-                numberOfThreads = systemInfo.dwNumberOfProcessors;
+                numberOfThreads = std::thread::hardware_concurrency();
             }
             else
             {
                 numberOfThreads = atoi(argv[3]);
             }
             printf("%d threads are used.\n", numberOfThreads);
+            miningThreads.resize(numberOfThreads);
             for (unsigned int i = numberOfThreads; i-- > 0; )
             {
-                CreateThread(NULL, 50331648, miningThreadProc, 0, 0, NULL);
+                miningThreads.emplace_back(miningThreadProc);
             }
+            ServerSocket serverSocket;
 
-            WSADATA wsaData;
-            WSAStartup(MAKEWORD(2, 2), &wsaData);
-
-            unsigned long long timestamp = GetTickCount64();
+            auto timestamp = std::chrono::steady_clock::now();
             long long prevNumberOfMiningIterations = 0;
             while (!state)
             {
-                if (!EQUAL(*((__m256i*)nonce), ZERO))
+                bool haveNonceToSend = false;
+                size_t itemToSend = 0;
+                std::array<unsigned char, 32> sendNonce;
                 {
-                    SOCKET serverSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-                    if (serverSocket == INVALID_SOCKET)
+                    std::lock_guard<std::mutex> guard(foundNonceLock);
+                    haveNonceToSend = foundNonce.size() > 0;
+                    if (haveNonceToSend)
                     {
-                        printf("Fail to create a socket (%d)!\n", WSAGetLastError());
+                        sendNonce = foundNonce.front();
                     }
-                    else
+                    itemToSend = foundNonce.size();
+                }
+                if (haveNonceToSend)
+                {
+                    if (serverSocket.establishConnection(argv[1]))
                     {
-                        sockaddr_in addr;
-                        ZeroMemory(&addr, sizeof(addr));
-                        addr.sin_family = AF_INET;
-                        addr.sin_port = htons(PORT);
-                        sscanf(argv[1], "%d.%d.%d.%d", &addr.sin_addr.S_un.S_un_b.s_b1, &addr.sin_addr.S_un.S_un_b.s_b2, &addr.sin_addr.S_un.S_un_b.s_b3, &addr.sin_addr.S_un.S_un_b.s_b4);
-                        if (connect(serverSocket, (const sockaddr*)&addr, sizeof(addr)))
+                        struct
                         {
-                            printf("Fail to connect to %d.%d.%d.%d (%d)!\n", addr.sin_addr.S_un.S_un_b.s_b1, addr.sin_addr.S_un.S_un_b.s_b2, addr.sin_addr.S_un.S_un_b.s_b3, addr.sin_addr.S_un.S_un_b.s_b4, WSAGetLastError());
-                        }
-                        else
+                            RequestResponseHeader header;
+                            Message message;
+                            unsigned char solutionNonce[32];
+                            unsigned char signature[64];
+                        } packet;
+
+                        packet.header.setSize(sizeof(packet));
+                        packet.header.zeroDejavu();
+                        packet.header.setType(BROADCAST_MESSAGE);
+
+                        memset(packet.message.sourcePublicKey, 0, sizeof(packet.message.sourcePublicKey));
+                        memcpy(packet.message.destinationPublicKey, computorPublicKey, sizeof(packet.message.destinationPublicKey));
+
+                        unsigned char sharedKeyAndGammingNonce[64];
+                        memset(sharedKeyAndGammingNonce, 0, 32);
+                        unsigned char gammingKey[32];
+                        do
                         {
-                            struct
-                            {
-                                RequestResponseHeader header;
-                                Message message;
-                                unsigned char solutionNonce[32];
-                                unsigned char signature[64];
-                            } packet;
+                            _rdrand64_step((unsigned long long*) & packet.message.gammingNonce[0]);
+                            _rdrand64_step((unsigned long long*) & packet.message.gammingNonce[8]);
+                            _rdrand64_step((unsigned long long*) & packet.message.gammingNonce[16]);
+                            _rdrand64_step((unsigned long long*) & packet.message.gammingNonce[24]);
+                            memcpy(&sharedKeyAndGammingNonce[32], packet.message.gammingNonce, 32);
+                            KangarooTwelve64To32(sharedKeyAndGammingNonce, gammingKey);
+                        } while (gammingKey[0]);
 
-                            packet.header.setSize(sizeof(packet));
-                            packet.header.setProtocol();
-                            packet.header.zeroDejavu();
-                            packet.header.setType(BROADCAST_MESSAGE);
-
-                            *((__m256i*)packet.message.sourcePublicKey) = ZERO;
-                            *((__m256i*)packet.message.destinationPublicKey) = *((__m256i*)computorPublicKey);
-
-                            unsigned char sharedKeyAndGammingNonce[64];
-                            ZeroMemory(sharedKeyAndGammingNonce, 32);
-                            unsigned char gammingKey[32];
-                            do
-                            {
-                                _rdrand64_step((unsigned long long*) & packet.message.gammingNonce[0]);
-                                _rdrand64_step((unsigned long long*) & packet.message.gammingNonce[8]);
-                                _rdrand64_step((unsigned long long*) & packet.message.gammingNonce[16]);
-                                _rdrand64_step((unsigned long long*) & packet.message.gammingNonce[24]);
-                                CopyMemory(&sharedKeyAndGammingNonce[32], packet.message.gammingNonce, 32);
-                                KangarooTwelve64To32(sharedKeyAndGammingNonce, gammingKey);
-                            } while (gammingKey[0]);
-
-                            unsigned char gamma[32];
-                            KangarooTwelve(gammingKey, sizeof(gammingKey), gamma, sizeof(gamma));
-                            for (unsigned int i = 0; i < 32; i++)
-                            {
-                                packet.solutionNonce[i] = nonce[i] ^ gamma[i];
-                            }
-
-                            _rdrand64_step((unsigned long long*) & packet.signature[0]);
-                            _rdrand64_step((unsigned long long*) & packet.signature[8]);
-                            _rdrand64_step((unsigned long long*) & packet.signature[16]);
-                            _rdrand64_step((unsigned long long*) & packet.signature[24]);
-                            _rdrand64_step((unsigned long long*) & packet.signature[32]);
-                            _rdrand64_step((unsigned long long*) & packet.signature[40]);
-                            _rdrand64_step((unsigned long long*) & packet.signature[48]);
-                            _rdrand64_step((unsigned long long*) & packet.signature[56]);
-
-                            if (sendData(serverSocket, (char*)&packet, packet.header.size()))
-                            {
-                                *((__m256i*)nonce) = ZERO;
-                            }
+                        unsigned char gamma[32];
+                        KangarooTwelve(gammingKey, sizeof(gammingKey), gamma, sizeof(gamma));
+                        for (unsigned int i = 0; i < 32; i++)
+                        {
+                            packet.solutionNonce[i] = sendNonce[i] ^ gamma[i];
                         }
 
-                        closesocket(serverSocket);
+                        _rdrand64_step((unsigned long long*) & packet.signature[0]);
+                        _rdrand64_step((unsigned long long*) & packet.signature[8]);
+                        _rdrand64_step((unsigned long long*) & packet.signature[16]);
+                        _rdrand64_step((unsigned long long*) & packet.signature[24]);
+                        _rdrand64_step((unsigned long long*) & packet.signature[32]);
+                        _rdrand64_step((unsigned long long*) & packet.signature[40]);
+                        _rdrand64_step((unsigned long long*) & packet.signature[48]);
+                        _rdrand64_step((unsigned long long*) & packet.signature[56]);
+
+                        if (serverSocket.sendData((char*)&packet, packet.header.size()))
+                        {
+                            std::lock_guard<std::mutex> guard(foundNonceLock);
+                            // Send data successfully. Remove it from the queue
+                            foundNonce.pop();
+                            itemToSend = foundNonce.size();
+                        }
+                        serverSocket.closeConnection();
                     }
                 }
 
-                Sleep(1000);
+                std::this_thread::sleep_for(std::chrono::duration < double, std::milli>(1000));
 
-                unsigned long long delta = GetTickCount64() - timestamp;
+                unsigned long long delta = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - timestamp).count();
                 if (delta >= 1000)
                 {
-                    SYSTEMTIME systemTime;
-                    GetSystemTime(&systemTime);
-                    printf("|   %d-%d%d-%d%d %d%d:%d%d:%d%d   |   %d it/s   |   %d solutions   |   %.10s...   |\n", systemTime.wYear, systemTime.wMonth / 10, systemTime.wMonth % 10, systemTime.wDay / 10, systemTime.wDay % 10, systemTime.wHour / 10, systemTime.wHour % 10, systemTime.wMinute / 10, systemTime.wMinute % 10, systemTime.wSecond / 10, systemTime.wSecond % 10, (numberOfMiningIterations - prevNumberOfMiningIterations) * 1000 / delta, numberOfFoundSolutions, argv[2]);
+                    // Get current time in UTC
+                    std::time_t now_time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+                    std::tm* utc_time = std::gmtime(&now_time);
+                    printf("|   %04d-%02d-%02d %02d:%02d:%02d   |   %llu it/s   |   %d solutions   |   %.10s...   |\n",
+                      utc_time->tm_year + 1900, utc_time->tm_mon, utc_time->tm_mday, utc_time->tm_hour, utc_time->tm_min, utc_time->tm_sec,
+                      (numberOfMiningIterations - prevNumberOfMiningIterations) * 1000 / delta, numberOfFoundSolutions.load(), argv[2]);
                     prevNumberOfMiningIterations = numberOfMiningIterations;
-                    timestamp = GetTickCount64();
+                    timestamp = std::chrono::steady_clock::now();
                 }
             }
-
-            WSACleanup();
         }
+        printf("Shutting down...Press Ctrl+C again to force stop.\n");
 
+        // Wait for all threads to join
+        for (auto& miningTh : miningThreads)
+        {
+            if (miningTh.joinable())
+            {
+                miningTh.join();
+            }
+        }
         printf("Qiner %d.0 is shut down.\n", EPOCH);
     }
 
