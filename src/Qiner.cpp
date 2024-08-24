@@ -10,23 +10,23 @@
 #include <queue>
 
 #ifdef _MSC_VER
-    #include <intrin.h>
-    #include <winsock2.h>
-    #pragma comment (lib, "ws2_32.lib")
+#include <intrin.h>
+#include <winsock2.h>
+#pragma comment (lib, "ws2_32.lib")
 
-    #define ROL64(a, offset) _rotl64(a, offset)
+#define ROL64(a, offset) _rotl64(a, offset)
 #else
-    #include <signal.h>
-    #include <immintrin.h>
-    #include <vector>
-    #include <arpa/inet.h>
-    #include <sys/socket.h>
+#include <signal.h>
+#include <immintrin.h>
+#include <vector>
+#include <arpa/inet.h>
+#include <sys/socket.h>
 
-    #if defined(__GNUC__) && !defined(__clang__)
-        #define _andn_u64(a, b) __andn_u64(a, b)
-    #endif
+#if defined(__GNUC__) && !defined(__clang__)
+#define _andn_u64(a, b) __andn_u64(a, b)
+#endif
 
-    #define ROL64(a, offset) ((((unsigned long long)a) << offset) ^ (((unsigned long long)a) >> (64 - offset)))
+#define ROL64(a, offset) ((((unsigned long long)a) << offset) ^ (((unsigned long long)a) >> (64 - offset)))
 #endif
 
 #if ENABLE_AVX512 || defined(__AVX512F__)
@@ -2218,6 +2218,29 @@ void random(unsigned char* publicKey, unsigned char* nonce, unsigned char* outpu
     }
 }
 
+void random2(unsigned char* publicKey, unsigned char* nonce, unsigned char* output, unsigned int outputSize) // outputSize must be a multiple of 8
+{
+    unsigned char state[200];
+    memcpy(&state[0], publicKey, 32);
+    memcpy(&state[32], nonce, 32);
+    memset(&state[64], 0, sizeof(state) - 64);
+
+    unsigned char pool[1048576 + 24]; // Need a multiple of 200
+
+    for (unsigned int i = 0; i < sizeof(pool); i += sizeof(state))
+    {
+        KeccakP1600_Permute_12rounds(state);
+        memcpy(&pool[i], state, sizeof(state));
+    }
+
+    unsigned int x = 0; // The same sequence is always used, exploit this for optimization
+    for (unsigned long long i = 0; i < outputSize; i += 8)
+    {
+        *((unsigned long long*) & output[i]) = *((unsigned long long*) & pool[x & (1048576 - 1)]);
+        x = x * 1664525 + 1013904223; // https://en.wikipedia.org/wiki/Linear_congruential_generator#Parameters_in_common_use
+    }
+}
+
 struct RequestResponseHeader
 {
 private:
@@ -2289,9 +2312,9 @@ typedef struct
 } Message;
 
 static constexpr unsigned long long DATA_LENGTH = 256;
-static constexpr unsigned long long NUMBER_OF_HIDDEN_NEURONS = 32768;
+static constexpr unsigned long long NUMBER_OF_HIDDEN_NEURONS = 8192;
 static constexpr unsigned long long NUMBER_OF_NEIGHBOR_NEURONS = 8192;
-static constexpr unsigned long long MAX_DURATION = 256;
+static constexpr unsigned long long MAX_DURATION = 8192;
 static constexpr unsigned int SOLUTION_THRESHOLD = 44;
 
 struct Miner
@@ -2557,8 +2580,8 @@ struct ServerSocket
         }
 
         if (connect(serverSocket, (struct sockaddr*)&addr, sizeof(addr)) < 0)
-         {
-            printf("Fail to connect to %s (%d)\n", address ,errno);
+        {
+            printf("Fail to connect to %s (%d)\n", address, errno);
             closeConnection();
             return false;
         }
@@ -2746,8 +2769,8 @@ int main(int argc, char* argv[])
                     std::time_t now_time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
                     std::tm* utc_time = std::gmtime(&now_time);
                     printf("|   %04d-%02d-%02d %02d:%02d:%02d   |   %llu it/s   |   %d solutions   |   %.10s...   |\n",
-                      utc_time->tm_year + 1900, utc_time->tm_mon, utc_time->tm_mday, utc_time->tm_hour, utc_time->tm_min, utc_time->tm_sec,
-                      (numberOfMiningIterations - prevNumberOfMiningIterations) * 1000 / delta, numberOfFoundSolutions.load(), argv[2]);
+                        utc_time->tm_year + 1900, utc_time->tm_mon, utc_time->tm_mday, utc_time->tm_hour, utc_time->tm_min, utc_time->tm_sec,
+                        (numberOfMiningIterations - prevNumberOfMiningIterations) * 1000 / delta, numberOfFoundSolutions.load(), argv[2]);
                     prevNumberOfMiningIterations = numberOfMiningIterations;
                     timestamp = std::chrono::steady_clock::now();
                 }
