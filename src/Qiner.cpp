@@ -2317,6 +2317,8 @@ static constexpr unsigned long long NUMBER_OF_NEIGHBOR_NEURONS = 8192;
 static constexpr unsigned long long MAX_DURATION = 8192;
 static constexpr unsigned int SOLUTION_THRESHOLD = 44;
 
+static_assert(MAX_DURATION <= 2147483647, "Total number of tick should not above MAX_INT");
+
 struct Miner
 {
     long long data[DATA_LENGTH];
@@ -2373,7 +2375,7 @@ struct Miner
 
         memcpy(&neurons.input[0], &data, sizeof(data));
 
-        for (unsigned long long tick = 1; tick <= MAX_DURATION; tick++)
+        for (int tick = 1; tick <= MAX_DURATION; tick++)
         {
             memcpy(&neuronBufferInput[0], &neurons.input[0], sizeof(neurons.input));
             for (unsigned long long inputNeuronIndex = 0; inputNeuronIndex < NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH; inputNeuronIndex++)
