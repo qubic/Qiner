@@ -2323,17 +2323,17 @@ struct Miner
 {
     long long data[DATA_LENGTH];
     unsigned char computorPublicKey[32];
+    unsigned char currentRandomSeed[32];
 
-    void initialize()
+    void initialize(unsigned char randomSeed[32])
     {
-        unsigned char randomSeed[32];
-        memset(randomSeed, 0, sizeof(randomSeed));
         random(randomSeed, randomSeed, (unsigned char*)data, sizeof(data));
         for (unsigned long long i = 0; i < DATA_LENGTH; i++)
         {
             data[i] = (data[i] >= 0 ? 1 : -1);
         }
 
+        memcpy(currentRandomSeed, randomSeed, sizeof(currentRandomSeed));
         memset(computorPublicKey, 0, sizeof(computorPublicKey));
     }
 
@@ -2426,6 +2426,7 @@ struct Miner
 static std::atomic<char> state(0);
 
 static unsigned char computorPublicKey[32];
+static unsigned char randomSeed[32];
 static std::atomic<long long> numberOfMiningIterations(0);
 static std::atomic<unsigned int> numberOfFoundSolutions(0);
 static std::queue<std::array<unsigned char, 32>> foundNonce;
@@ -2493,7 +2494,7 @@ bool isZeros(const unsigned char* value)
 int miningThreadProc()
 {
     static Miner miner;
-    miner.initialize();
+    miner.initialize(randomSeed);
     miner.setComputorPublicKey(computorPublicKey);
 
     std::array<unsigned char, 32> nonce;
@@ -2670,6 +2671,11 @@ int main(int argc, char* argv[])
         }
         else
         {
+            _rdrand64_step((unsigned long long*) & randomSeed[0]);
+            _rdrand64_step((unsigned long long*) & randomSeed[8]);
+            _rdrand64_step((unsigned long long*) & randomSeed[16]);
+            _rdrand64_step((unsigned long long*) & randomSeed[24]);
+
             unsigned int numberOfThreads;
             if (argc < 4)
             {
@@ -2711,6 +2717,7 @@ int main(int argc, char* argv[])
                         {
                             RequestResponseHeader header;
                             Message message;
+                            unsigned char solutionMiningSeed[32];
                             unsigned char solutionNonce[32];
                             unsigned char signature[64];
                         } packet;
@@ -2735,11 +2742,12 @@ int main(int argc, char* argv[])
                             KangarooTwelve64To32(sharedKeyAndGammingNonce, gammingKey);
                         } while (gammingKey[0]);
 
-                        unsigned char gamma[32];
+                        unsigned char gamma[32 + 32];
                         KangarooTwelve(gammingKey, sizeof(gammingKey), gamma, sizeof(gamma));
                         for (unsigned int i = 0; i < 32; i++)
                         {
-                            packet.solutionNonce[i] = sendNonce[i] ^ gamma[i];
+                            packet.solutionMiningSeed[i] = randomSeed[i] ^ gamma[i];
+                            packet.solutionNonce[i] = sendNonce[i] ^ gamma[i + 32];
                         }
 
                         _rdrand64_step((unsigned long long*) & packet.signature[0]);
