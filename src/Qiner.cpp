@@ -2493,14 +2493,14 @@ bool isZeros(const unsigned char* value)
 
 int miningThreadProc()
 {
-    static Miner miner;
-    miner.initialize(randomSeed);
-    miner.setComputorPublicKey(computorPublicKey);
+    std::unique_ptr<Miner> miner(new Miner());
+    miner->initialize(randomSeed);
+    miner->setComputorPublicKey(computorPublicKey);
 
     std::array<unsigned char, 32> nonce;
     while (!state)
     {
-        if (miner.findSolution(nonce.data()))
+        if (miner->findSolution(nonce.data()))
         {
             {
                 std::lock_guard<std::mutex> guard(foundNonceLock);
