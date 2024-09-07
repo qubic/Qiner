@@ -10,23 +10,23 @@
 #include <queue>
 
 #ifdef _MSC_VER
-    #include <intrin.h>
-    #include <winsock2.h>
-    #pragma comment (lib, "ws2_32.lib")
+#include <intrin.h>
+#include <winsock2.h>
+#pragma comment (lib, "ws2_32.lib")
 
-    #define ROL64(a, offset) _rotl64(a, offset)
+#define ROL64(a, offset) _rotl64(a, offset)
 #else
-    #include <signal.h>
-    #include <immintrin.h>
-    #include <vector>
-    #include <arpa/inet.h>
-    #include <sys/socket.h>
+#include <signal.h>
+#include <immintrin.h>
+#include <vector>
+#include <arpa/inet.h>
+#include <sys/socket.h>
 
-    #if defined(__GNUC__) && !defined(__clang__)
-        #define _andn_u64(a, b) __andn_u64(a, b)
-    #endif
+#if defined(__GNUC__) && !defined(__clang__)
+#define _andn_u64(a, b) __andn_u64(a, b)
+#endif
 
-    #define ROL64(a, offset) ((((unsigned long long)a) << offset) ^ (((unsigned long long)a) >> (64 - offset)))
+#define ROL64(a, offset) ((((unsigned long long)a) << offset) ^ (((unsigned long long)a) >> (64 - offset)))
 #endif
 
 #if ENABLE_AVX512 || defined(__AVX512F__)
@@ -1104,7 +1104,7 @@ static void KangarooTwelve_F_Absorb(KangarooTwelve_F* instance, unsigned char* d
     }
 }
 
-static void KangarooTwelve(unsigned char* input, unsigned int inputByteLen, unsigned char* output, unsigned int outputByteLen)
+static void KangarooTwelve(unsigned char* input, unsigned int inputByteLen, unsigned char* output, unsigned long long outputByteLen)
 {
     KangarooTwelve_F queueNode;
     KangarooTwelve_F finalNode;
@@ -2218,6 +2218,29 @@ void random(unsigned char* publicKey, unsigned char* nonce, unsigned char* outpu
     }
 }
 
+void random2(unsigned char* publicKey, unsigned char* nonce, unsigned char* output, unsigned int outputSize) // outputSize must be a multiple of 8
+{
+    unsigned char state[200];
+    memcpy(&state[0], publicKey, 32);
+    memcpy(&state[32], nonce, 32);
+    memset(&state[64], 0, sizeof(state) - 64);
+
+    unsigned char pool[1048576 + 24]; // Need a multiple of 200
+
+    for (unsigned int i = 0; i < sizeof(pool); i += sizeof(state))
+    {
+        KeccakP1600_Permute_12rounds(state);
+        memcpy(&pool[i], state, sizeof(state));
+    }
+
+    unsigned int x = 0; // The same sequence is always used, exploit this for optimization
+    for (unsigned long long i = 0; i < outputSize; i += 8)
+    {
+        *((unsigned long long*) & output[i]) = *((unsigned long long*) & pool[x & (1048576 - 1)]);
+        x = x * 1664525 + 1013904223; // https://en.wikipedia.org/wiki/Linear_congruential_generator#Parameters_in_common_use
+    }
+}
+
 struct RequestResponseHeader
 {
 private:
@@ -2288,27 +2311,29 @@ typedef struct
     unsigned char gammingNonce[32];
 } Message;
 
-#define DATA_LENGTH 256
-#define NUMBER_OF_INPUT_NEURONS 16384
-#define MAX_INPUT_DURATION 4096
-#define NEURON_VALUE_LIMIT 1LL
-#define SOLUTION_THRESHOLD 44
+static constexpr unsigned long long DATA_LENGTH = 256;
+static constexpr unsigned long long NUMBER_OF_HIDDEN_NEURONS = 8192;
+static constexpr unsigned long long NUMBER_OF_NEIGHBOR_NEURONS = 8192;
+static constexpr unsigned long long MAX_DURATION = 8192;
+static constexpr unsigned int SOLUTION_THRESHOLD = 44;
+
+static_assert(MAX_DURATION <= 2147483647, "Total number of tick should not above MAX_INT");
 
 struct Miner
 {
     long long data[DATA_LENGTH];
     unsigned char computorPublicKey[32];
+    unsigned char currentRandomSeed[32];
 
-    void initialize()
+    void initialize(unsigned char randomSeed[32])
     {
-        unsigned char randomSeed[32];
-        memset(randomSeed, 0, sizeof(randomSeed));
         random(randomSeed, randomSeed, (unsigned char*)data, sizeof(data));
-        for (unsigned int i = 0; i < DATA_LENGTH; i++)
+        for (unsigned long long i = 0; i < DATA_LENGTH; i++)
         {
             data[i] = (data[i] >= 0 ? 1 : -1);
         }
 
+        memcpy(currentRandomSeed, randomSeed, sizeof(currentRandomSeed));
         memset(computorPublicKey, 0, sizeof(computorPublicKey));
     }
 
@@ -2324,13 +2349,13 @@ struct Miner
 
     struct
     {
-        long long input[DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + DATA_LENGTH];
+        long long input[DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH];
     } neurons;
     struct
     {
-        char inputLength[(NUMBER_OF_INPUT_NEURONS + DATA_LENGTH) * (DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + DATA_LENGTH)];
+        char inputLength[(NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH) * NUMBER_OF_NEIGHBOR_NEURONS];
     } synapses;
-    long long neuronBufferInput[DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + DATA_LENGTH];
+    long long neuronBufferInput[DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH];
 
     bool findSolution(unsigned char nonce[32])
     {
@@ -2340,35 +2365,28 @@ struct Miner
         _rdrand64_step((unsigned long long*) & nonce[16]);
         _rdrand64_step((unsigned long long*) & nonce[24]);
         random(computorPublicKey, nonce, (unsigned char*)&synapses, sizeof(synapses));
-        for (unsigned int inputNeuronIndex = 0; inputNeuronIndex < NUMBER_OF_INPUT_NEURONS + DATA_LENGTH; inputNeuronIndex++)
+        for (unsigned long long synapseIndex = 0; synapseIndex < (NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH) * NUMBER_OF_NEIGHBOR_NEURONS; synapseIndex++)
         {
-            for (unsigned int anotherInputNeuronIndex = 0; anotherInputNeuronIndex < DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + DATA_LENGTH; anotherInputNeuronIndex++)
+            if (synapses.inputLength[synapseIndex] == -128)
             {
-                const unsigned int offset = inputNeuronIndex * (DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + DATA_LENGTH) + anotherInputNeuronIndex;
-                if (synapses.inputLength[offset] == -128)
-                {
-                    synapses.inputLength[offset] = 0;
-                }
+                synapses.inputLength[synapseIndex] = 0;
             }
-        }
-        for (unsigned int inputNeuronIndex = 0; inputNeuronIndex < NUMBER_OF_INPUT_NEURONS + DATA_LENGTH; inputNeuronIndex++)
-        {
-            synapses.inputLength[inputNeuronIndex * (DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + DATA_LENGTH) + (DATA_LENGTH + inputNeuronIndex)] = 0;
         }
 
         memcpy(&neurons.input[0], &data, sizeof(data));
 
-        for (int tick = 1; tick <= MAX_INPUT_DURATION; tick++)
+        for (int tick = 1; tick <= MAX_DURATION; tick++)
         {
             memcpy(&neuronBufferInput[0], &neurons.input[0], sizeof(neurons.input));
-            for (unsigned int inputNeuronIndex = 0; inputNeuronIndex < NUMBER_OF_INPUT_NEURONS + DATA_LENGTH; inputNeuronIndex++)
+            for (unsigned long long inputNeuronIndex = 0; inputNeuronIndex < NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH; inputNeuronIndex++)
             {
-                for (unsigned int anotherInputNeuronIndex = 0; anotherInputNeuronIndex < DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + DATA_LENGTH; anotherInputNeuronIndex++)
+                for (unsigned long long i = 0; i < NUMBER_OF_NEIGHBOR_NEURONS; i++)
                 {
-                    const unsigned int offset = inputNeuronIndex * (DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + DATA_LENGTH) + anotherInputNeuronIndex;
+                    const unsigned long long offset = inputNeuronIndex * NUMBER_OF_NEIGHBOR_NEURONS + i;
                     if (synapses.inputLength[offset] != 0
                         && tick % synapses.inputLength[offset] == 0)
                     {
+                        unsigned long long anotherInputNeuronIndex = (inputNeuronIndex + 1 + i) % (DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH);
                         if (synapses.inputLength[offset] > 0)
                         {
                             neurons.input[DATA_LENGTH + inputNeuronIndex] += neuronBufferInput[anotherInputNeuronIndex];
@@ -2378,13 +2396,13 @@ struct Miner
                             neurons.input[DATA_LENGTH + inputNeuronIndex] -= neuronBufferInput[anotherInputNeuronIndex];
                         }
 
-                        if (neurons.input[DATA_LENGTH + inputNeuronIndex] > NEURON_VALUE_LIMIT)
+                        if (neurons.input[DATA_LENGTH + inputNeuronIndex] > 1)
                         {
-                            neurons.input[DATA_LENGTH + inputNeuronIndex] = NEURON_VALUE_LIMIT;
+                            neurons.input[DATA_LENGTH + inputNeuronIndex] = 1;
                         }
-                        if (neurons.input[DATA_LENGTH + inputNeuronIndex] < -NEURON_VALUE_LIMIT)
+                        if (neurons.input[DATA_LENGTH + inputNeuronIndex] < -1)
                         {
-                            neurons.input[DATA_LENGTH + inputNeuronIndex] = -NEURON_VALUE_LIMIT;
+                            neurons.input[DATA_LENGTH + inputNeuronIndex] = -1;
                         }
                     }
                 }
@@ -2393,9 +2411,9 @@ struct Miner
 
         unsigned int score = 0;
 
-        for (unsigned int i = 0; i < DATA_LENGTH; i++)
+        for (unsigned long long i = 0; i < DATA_LENGTH; i++)
         {
-            if (data[i] == neurons.input[DATA_LENGTH + NUMBER_OF_INPUT_NEURONS + i])
+            if (data[i] == neurons.input[DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + i])
             {
                 score++;
             }
@@ -2408,6 +2426,7 @@ struct Miner
 static std::atomic<char> state(0);
 
 static unsigned char computorPublicKey[32];
+static unsigned char randomSeed[32];
 static std::atomic<long long> numberOfMiningIterations(0);
 static std::atomic<unsigned int> numberOfFoundSolutions(0);
 static std::queue<std::array<unsigned char, 32>> foundNonce;
@@ -2458,11 +2477,11 @@ int getSystemProcs()
     return 0;
 }
 
-template<int num>
-bool isZeros(unsigned char* value)
+template<unsigned long long num>
+bool isZeros(const unsigned char* value)
 {
     bool allZeros = true;
-    for (int i = 0; i < num; ++i)
+    for (unsigned long long i = 0; i < num; ++i)
     {
         if (value[i] != 0)
         {
@@ -2474,14 +2493,14 @@ bool isZeros(unsigned char* value)
 
 int miningThreadProc()
 {
-    static Miner miner;
-    miner.initialize();
-    miner.setComputorPublicKey(computorPublicKey);
+    std::unique_ptr<Miner> miner(new Miner());
+    miner->initialize(randomSeed);
+    miner->setComputorPublicKey(computorPublicKey);
 
     std::array<unsigned char, 32> nonce;
     while (!state)
     {
-        if (miner.findSolution(nonce.data()))
+        if (miner->findSolution(nonce.data()))
         {
             {
                 std::lock_guard<std::mutex> guard(foundNonceLock);
@@ -2564,8 +2583,8 @@ struct ServerSocket
         }
 
         if (connect(serverSocket, (struct sockaddr*)&addr, sizeof(addr)) < 0)
-         {
-            printf("Fail to connect to %s (%d)\n", address ,errno);
+        {
+            printf("Fail to connect to %s (%d)\n", address, errno);
             closeConnection();
             return false;
         }
@@ -2652,6 +2671,11 @@ int main(int argc, char* argv[])
         }
         else
         {
+            _rdrand64_step((unsigned long long*) & randomSeed[0]);
+            _rdrand64_step((unsigned long long*) & randomSeed[8]);
+            _rdrand64_step((unsigned long long*) & randomSeed[16]);
+            _rdrand64_step((unsigned long long*) & randomSeed[24]);
+
             unsigned int numberOfThreads;
             if (argc < 4)
             {
@@ -2693,6 +2717,7 @@ int main(int argc, char* argv[])
                         {
                             RequestResponseHeader header;
                             Message message;
+                            unsigned char solutionMiningSeed[32];
                             unsigned char solutionNonce[32];
                             unsigned char signature[64];
                         } packet;
@@ -2717,11 +2742,12 @@ int main(int argc, char* argv[])
                             KangarooTwelve64To32(sharedKeyAndGammingNonce, gammingKey);
                         } while (gammingKey[0]);
 
-                        unsigned char gamma[32];
+                        unsigned char gamma[32 + 32];
                         KangarooTwelve(gammingKey, sizeof(gammingKey), gamma, sizeof(gamma));
                         for (unsigned int i = 0; i < 32; i++)
                         {
-                            packet.solutionNonce[i] = sendNonce[i] ^ gamma[i];
+                            packet.solutionMiningSeed[i] = randomSeed[i] ^ gamma[i];
+                            packet.solutionNonce[i] = sendNonce[i] ^ gamma[i + 32];
                         }
 
                         _rdrand64_step((unsigned long long*) & packet.signature[0]);
@@ -2753,8 +2779,8 @@ int main(int argc, char* argv[])
                     std::time_t now_time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
                     std::tm* utc_time = std::gmtime(&now_time);
                     printf("|   %04d-%02d-%02d %02d:%02d:%02d   |   %llu it/s   |   %d solutions   |   %.10s...   |\n",
-                      utc_time->tm_year + 1900, utc_time->tm_mon, utc_time->tm_mday, utc_time->tm_hour, utc_time->tm_min, utc_time->tm_sec,
-                      (numberOfMiningIterations - prevNumberOfMiningIterations) * 1000 / delta, numberOfFoundSolutions.load(), argv[2]);
+                        utc_time->tm_year + 1900, utc_time->tm_mon, utc_time->tm_mday, utc_time->tm_hour, utc_time->tm_min, utc_time->tm_sec,
+                        (numberOfMiningIterations - prevNumberOfMiningIterations) * 1000 / delta, numberOfFoundSolutions.load(), argv[2]);
                     prevNumberOfMiningIterations = numberOfMiningIterations;
                     timestamp = std::chrono::steady_clock::now();
                 }
