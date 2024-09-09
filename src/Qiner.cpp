@@ -2364,7 +2364,7 @@ struct Miner
         _rdrand64_step((unsigned long long*) & nonce[8]);
         _rdrand64_step((unsigned long long*) & nonce[16]);
         _rdrand64_step((unsigned long long*) & nonce[24]);
-        random(computorPublicKey, nonce, (unsigned char*)&synapses, sizeof(synapses));
+        random2(computorPublicKey, nonce, (unsigned char*)&synapses, sizeof(synapses));
         for (unsigned long long synapseIndex = 0; synapseIndex < (NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH) * NUMBER_OF_NEIGHBOR_NEURONS; synapseIndex++)
         {
             if (synapses.inputLength[synapseIndex] == -128)
