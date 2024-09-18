@@ -8,7 +8,8 @@
 #include <cstring>
 #include <array>
 #include <queue>
-
+#include <atomic>
+#include <vector>
 #ifdef _MSC_VER
 #include <intrin.h>
 #include <winsock2.h>
@@ -18,9 +19,10 @@
 #else
 #include <signal.h>
 #include <immintrin.h>
-#include <vector>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <unistd.h>
+
 
 #if defined(__GNUC__) && !defined(__clang__)
 #define _andn_u64(a, b) __andn_u64(a, b)
@@ -2312,10 +2314,10 @@ typedef struct
 } Message;
 
 static constexpr unsigned long long DATA_LENGTH = 256;
-static constexpr unsigned long long NUMBER_OF_HIDDEN_NEURONS = 8192;
-static constexpr unsigned long long NUMBER_OF_NEIGHBOR_NEURONS = 8192;
-static constexpr unsigned long long MAX_DURATION = 8192;
-static constexpr unsigned int SOLUTION_THRESHOLD = 44;
+static constexpr unsigned long long NUMBER_OF_HIDDEN_NEURONS = 6000;
+static constexpr unsigned long long NUMBER_OF_NEIGHBOR_NEURONS = 2000;
+static constexpr unsigned long long MAX_DURATION = 2000;
+static constexpr unsigned int SOLUTION_THRESHOLD = 42;
 
 static_assert(MAX_DURATION <= 2147483647, "Total number of tick should not above MAX_INT");
 

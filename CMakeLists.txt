@@ -39,6 +39,7 @@ add_executable(${PROJECT_NAME} src/Qiner.cpp)
 if(WIN32)
     target_link_libraries(${PROJECT_NAME} wsock32 ws2_32)
 else()
+    target_link_libraries(${PROJECT_NAME} pthread)
 endif()
 
 if(ENABLE_AVX512)
