@@ -1,6 +1,3 @@
-#define PORT 21841
-#define EPOCH 0
-
 #include <chrono>
 #include <thread>
 #include <mutex>
@@ -2313,6 +2310,8 @@ typedef struct
     unsigned char gammingNonce[32];
 } Message;
 
+char* nodeIp = NULL;
+int nodePort = 0;
 static constexpr unsigned long long DATA_LENGTH = 256;
 static constexpr unsigned long long NUMBER_OF_HIDDEN_NEURONS = 6000;
 static constexpr unsigned long long NUMBER_OF_NEIGHBOR_NEURONS = 2000;
@@ -2547,7 +2546,7 @@ struct ServerSocket
         sockaddr_in addr;
         ZeroMemory(&addr, sizeof(addr));
         addr.sin_family = AF_INET;
-        addr.sin_port = htons(PORT);
+        addr.sin_port = htons(nodePort);
         sscanf_s(address, "%hhu.%hhu.%hhu.%hhu", &addr.sin_addr.S_un.S_un_b.s_b1, &addr.sin_addr.S_un.S_un_b.s_b2, &addr.sin_addr.S_un.S_un_b.s_b3, &addr.sin_addr.S_un.S_un_b.s_b4);
         if (connect(serverSocket, (const sockaddr*)&addr, sizeof(addr)))
         {
@@ -2577,7 +2576,7 @@ struct ServerSocket
         sockaddr_in addr;
         memset(&addr, 0, sizeof(addr));
         addr.sin_family = AF_INET;
-        addr.sin_port = htons(PORT);
+        addr.sin_port = htons(nodePort);
         if (inet_pton(AF_INET, address, &addr.sin_addr) <= 0)
         {
             printf("Invalid address/ Address not supported (%s)\n", address);
@@ -2652,41 +2651,38 @@ static bool getPublicKeyFromIdentity(const unsigned char* id, unsigned char* pub
 
     return true;
 }
+static void hexToByte(const char* hex, uint8_t* byte, const int sizeInByte)
+{
+    for (int i = 0; i < sizeInByte; i++){
+        sscanf(hex+i*2, "%2hhx", &byte[i]);
+    }
+}
 
 int main(int argc, char* argv[])
 {
     std::vector<std::thread> miningThreads;
 
-    if (argc < 3)
+    if (argc != 6)
     {
-        printf("Usage:   Qiner IP-address Id [Number of threads]\n");
+        printf("Usage:   Qiner [Node IP] [Node Port] [Mining ID] [Mining Seed] [Number of threads]\n");
     }
     else
     {
-        printf("Qiner %d.0 is launched.\n", EPOCH);
+        nodeIp = argv[1];
+        nodePort = std::atoi(argv[2]);
+        char* miningID = argv[3];
+        printf("Qiner is launched. Connecting to %s:%d\n", nodeIp, nodePort);
 
         consoleCtrlHandler();
 
-        if (!getPublicKeyFromIdentity((const unsigned char*)argv[2], computorPublicKey))
+        if (!getPublicKeyFromIdentity((const unsigned char*)miningID, computorPublicKey))
         {
             printf("The Id is invalid!\n");
         }
         else
         {
-            _rdrand64_step((unsigned long long*) & randomSeed[0]);
-            _rdrand64_step((unsigned long long*) & randomSeed[8]);
-            _rdrand64_step((unsigned long long*) & randomSeed[16]);
-            _rdrand64_step((unsigned long long*) & randomSeed[24]);
-
-            unsigned int numberOfThreads;
-            if (argc < 4)
-            {
-                numberOfThreads = std::thread::hardware_concurrency();
-            }
-            else
-            {
-                numberOfThreads = atoi(argv[3]);
-            }
+            hexToByte(argv[4], randomSeed, 32);
+            unsigned int numberOfThreads = atoi(argv[5]);
             printf("%d threads are used.\n", numberOfThreads);
             miningThreads.resize(numberOfThreads);
             for (unsigned int i = numberOfThreads; i-- > 0; )
@@ -2713,7 +2709,7 @@ int main(int argc, char* argv[])
                 }
                 if (haveNonceToSend)
                 {
-                    if (serverSocket.establishConnection(argv[1]))
+                    if (serverSocket.establishConnection(nodeIp))
                     {
                         struct
                         {
@@ -2782,7 +2778,7 @@ int main(int argc, char* argv[])
                     std::tm* utc_time = std::gmtime(&now_time);
                     printf("|   %04d-%02d-%02d %02d:%02d:%02d   |   %llu it/s   |   %d solutions   |   %.10s...   |\n",
                         utc_time->tm_year + 1900, utc_time->tm_mon, utc_time->tm_mday, utc_time->tm_hour, utc_time->tm_min, utc_time->tm_sec,
-                        (numberOfMiningIterations - prevNumberOfMiningIterations) * 1000 / delta, numberOfFoundSolutions.load(), argv[2]);
+                        (numberOfMiningIterations - prevNumberOfMiningIterations) * 1000 / delta, numberOfFoundSolutions.load(), miningID);
                     prevNumberOfMiningIterations = numberOfMiningIterations;
                     timestamp = std::chrono::steady_clock::now();
                 }
@@ -2798,7 +2794,7 @@ int main(int argc, char* argv[])
                 miningTh.join();
             }
         }
-        printf("Qiner %d.0 is shut down.\n", EPOCH);
+        printf("Qiner is shut down.\n");
     }
 
     return 0;
