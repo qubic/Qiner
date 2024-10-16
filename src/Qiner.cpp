@@ -2318,7 +2318,7 @@ static constexpr unsigned long long NUMBER_OF_NEIGHBOR_NEURONS = 2000;
 static constexpr unsigned long long MAX_DURATION = 2000;
 static constexpr unsigned int SOLUTION_THRESHOLD = 42;
 
-static_assert(MAX_DURATION <= 2147483647, "Total number of tick should not above MAX_INT");
+//static_assert(MAX_DURATION <= 2147483647, "Total number of tick should not above MAX_INT");
 
 struct Miner
 {
@@ -2354,59 +2354,52 @@ struct Miner
     } neurons;
     struct
     {
-        char inputLength[(NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH) * NUMBER_OF_NEIGHBOR_NEURONS];
+        unsigned long long signs[(DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH) * NUMBER_OF_NEIGHBOR_NEURONS / 64];
+        unsigned long long sequence[MAX_DURATION];
     } synapses;
-    long long neuronBufferInput[DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH];
 
     bool findSolution(unsigned char nonce[32])
     {
         memset(&neurons, 0, sizeof(neurons));
-        _rdrand64_step((unsigned long long*) & nonce[0]);
-        _rdrand64_step((unsigned long long*) & nonce[8]);
-        _rdrand64_step((unsigned long long*) & nonce[16]);
-        _rdrand64_step((unsigned long long*) & nonce[24]);
+        _rdrand64_step((unsigned long long*)&nonce[0]);
+        _rdrand64_step((unsigned long long*)&nonce[8]);
+        _rdrand64_step((unsigned long long*)&nonce[16]);
+        _rdrand64_step((unsigned long long*)&nonce[24]);
         random2(computorPublicKey, nonce, (unsigned char*)&synapses, sizeof(synapses));
-        for (unsigned long long synapseIndex = 0; synapseIndex < (NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH) * NUMBER_OF_NEIGHBOR_NEURONS; synapseIndex++)
-        {
-            if (synapses.inputLength[synapseIndex] == -128)
-            {
-                synapses.inputLength[synapseIndex] = 0;
-            }
-        }
 
         memcpy(&neurons.input[0], &data, sizeof(data));
 
-        for (int tick = 1; tick <= MAX_DURATION; tick++)
+        for (long long tick = 0; tick < MAX_DURATION; tick++)
         {
-            memcpy(&neuronBufferInput[0], &neurons.input[0], sizeof(neurons.input));
-            for (unsigned long long inputNeuronIndex = 0; inputNeuronIndex < NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH; inputNeuronIndex++)
+            const unsigned long long neuronIndex = DATA_LENGTH + synapses.sequence[tick] % (NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH);
+            const unsigned long long neighborNeuronIndex = (synapses.sequence[tick] / (NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH)) % NUMBER_OF_NEIGHBOR_NEURONS;
+            unsigned long long supplierNeuronIndex;
+            if (neighborNeuronIndex < NUMBER_OF_NEIGHBOR_NEURONS / 2)
             {
-                for (unsigned long long i = 0; i < NUMBER_OF_NEIGHBOR_NEURONS; i++)
-                {
-                    const unsigned long long offset = inputNeuronIndex * NUMBER_OF_NEIGHBOR_NEURONS + i;
-                    if (synapses.inputLength[offset] != 0
-                        && tick % synapses.inputLength[offset] == 0)
-                    {
-                        unsigned long long anotherInputNeuronIndex = (inputNeuronIndex + 1 + i) % (DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH);
-                        if (synapses.inputLength[offset] > 0)
-                        {
-                            neurons.input[DATA_LENGTH + inputNeuronIndex] += neuronBufferInput[anotherInputNeuronIndex];
-                        }
-                        else
-                        {
-                            neurons.input[DATA_LENGTH + inputNeuronIndex] -= neuronBufferInput[anotherInputNeuronIndex];
-                        }
+                supplierNeuronIndex = (neuronIndex - (NUMBER_OF_NEIGHBOR_NEURONS / 2) + neighborNeuronIndex + (DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH)) % (DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH);
+            }
+            else
+            {
+                supplierNeuronIndex = (neuronIndex + 1 - (NUMBER_OF_NEIGHBOR_NEURONS / 2) + neighborNeuronIndex + (DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH)) % (DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH);
+            }
+            const unsigned long long offset = neuronIndex * NUMBER_OF_NEIGHBOR_NEURONS + neighborNeuronIndex;
 
-                        if (neurons.input[DATA_LENGTH + inputNeuronIndex] > 1)
-                        {
-                            neurons.input[DATA_LENGTH + inputNeuronIndex] = 1;
-                        }
-                        if (neurons.input[DATA_LENGTH + inputNeuronIndex] < -1)
-                        {
-                            neurons.input[DATA_LENGTH + inputNeuronIndex] = -1;
-                        }
-                    }
-                }
+            if (!(synapses.signs[offset / 64] & (1ULL << (offset % 64))))
+            {
+                neurons.input[neuronIndex] += neurons.input[supplierNeuronIndex];
+            }
+            else
+            {
+                neurons.input[neuronIndex] -= neurons.input[supplierNeuronIndex];
+            }
+
+            if (neurons.input[neuronIndex] > 1)
+            {
+                neurons.input[neuronIndex] = 1;
+            }
+            if (neurons.input[neuronIndex] < -1)
+            {
+                neurons.input[neuronIndex] = -1;
             }
         }
 
