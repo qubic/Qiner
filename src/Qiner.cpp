@@ -2313,9 +2313,9 @@ typedef struct
 char* nodeIp = NULL;
 int nodePort = 0;
 static constexpr unsigned long long DATA_LENGTH = 256;
-static constexpr unsigned long long NUMBER_OF_HIDDEN_NEURONS = 6000;
-static constexpr unsigned long long NUMBER_OF_NEIGHBOR_NEURONS = 2000;
-static constexpr unsigned long long MAX_DURATION = 2000;
+static constexpr unsigned long long NUMBER_OF_HIDDEN_NEURONS = 24000;
+static constexpr unsigned long long NUMBER_OF_NEIGHBOR_NEURONS = 10000;
+static constexpr unsigned long long MAX_DURATION = 5000000;
 static constexpr unsigned int SOLUTION_THRESHOLD = 42;
 
 //static_assert(MAX_DURATION <= 2147483647, "Total number of tick should not above MAX_INT");
