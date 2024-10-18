@@ -2367,7 +2367,7 @@ struct Miner
         _rdrand64_step((unsigned long long*)&nonce[24]);
         random2(computorPublicKey, nonce, (unsigned char*)&synapses, sizeof(synapses));
 
-        memcpy(&neurons.input[0], &data, sizeof(data));
+        memcpy(&neurons.input[0], data, sizeof(data));
 
         for (long long tick = 0; tick < MAX_DURATION; tick++)
         {
