@@ -2318,7 +2318,7 @@ static constexpr unsigned long long NUMBER_OF_NEIGHBOR_NEURONS = 10000;
 static constexpr unsigned long long MAX_DURATION = 5000000;
 static constexpr unsigned int SOLUTION_THRESHOLD = 42;
 
-//static_assert(MAX_DURATION <= 2147483647, "Total number of tick should not above MAX_INT");
+static_assert(((DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH)* NUMBER_OF_NEIGHBOR_NEURONS) % 64 == 0, "Synapse size need to be a multipler of 64");
 
 struct Miner
 {
