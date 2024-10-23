@@ -2413,7 +2413,7 @@ struct Miner
             }
         }
 
-        return (score >= (DATA_LENGTH / 2) + SOLUTION_THRESHOLD) || (score <= (DATA_LENGTH / 2) - SOLUTION_THRESHOLD);
+        return (score >= (DATA_LENGTH / 3) + SOLUTION_THRESHOLD) || (score <= (DATA_LENGTH / 3) - SOLUTION_THRESHOLD);
     }
 };
 
