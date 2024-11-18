@@ -2313,14 +2313,14 @@ typedef struct
 char* nodeIp = NULL;
 int nodePort = 0;
 static constexpr unsigned long long DATA_LENGTH = 256;
-static constexpr unsigned long long NUMBER_OF_HIDDEN_NEURONS = 10000;
-static constexpr unsigned long long NUMBER_OF_NEIGHBOR_NEURONS = 10000;
-static constexpr unsigned long long MAX_DURATION = 100000000;
-static constexpr unsigned long long NUMBER_OF_TRIES = 10000;
+static constexpr unsigned long long NUMBER_OF_HIDDEN_NEURONS = 3000;
+static constexpr unsigned long long NUMBER_OF_NEIGHBOR_NEURONS = 3000;
+static constexpr unsigned long long MAX_DURATION = 3000*3000;
+static constexpr unsigned long long NUMBER_OF_OPTIMIZATION_STEPS = 100;
 static constexpr unsigned int SOLUTION_THRESHOLD = 42;
 
 static_assert(((DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH)* NUMBER_OF_NEIGHBOR_NEURONS) % 64 == 0, "Synapse size need to be a multipler of 64");
-static_assert(NUMBER_OF_TRIES < MAX_DURATION, "Number of retries need to smaller than MAX_DURATION");
+static_assert(NUMBER_OF_OPTIMIZATION_STEPS < MAX_DURATION, "Number of retries need to smaller than MAX_DURATION");
 
 struct Miner
 {
@@ -2359,11 +2359,11 @@ struct Miner
         unsigned long long signs[(DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH) * NUMBER_OF_NEIGHBOR_NEURONS / 64];
         unsigned long long sequence[MAX_DURATION];
         // Use for randomly select skipped ticks
-        unsigned long long skipTicksNumber[NUMBER_OF_TRIES];
+        unsigned long long skipTicksNumber[NUMBER_OF_OPTIMIZATION_STEPS];
     } synapses;
 
     // Save skipped ticks
-    long long skipTicks[NUMBER_OF_TRIES];
+    long long skipTicks[NUMBER_OF_OPTIMIZATION_STEPS];
 
     // Contained all ticks possible value
     long long ticksNumbers[MAX_DURATION];
@@ -2384,7 +2384,7 @@ struct Miner
             ticksNumbers[tick] = tick;
         }
 
-        for (long long l = 0; l < NUMBER_OF_TRIES; l++)
+        for (long long l = 0; l < NUMBER_OF_OPTIMIZATION_STEPS; l++)
         {
             skipTicks[l] = -1LL;
         }
@@ -2404,7 +2404,7 @@ struct Miner
         // - Continue this process iteratively.
         unsigned long long numberOfSkippedTicks = 0;
         long long skipTick = -1;
-        for (long long l = 0; l < NUMBER_OF_TRIES; l++)
+        for (long long l = 0; l < NUMBER_OF_OPTIMIZATION_STEPS; l++)
         {
             memset(&neurons, 0, sizeof(neurons));
             memcpy(&neurons.input[0], data, sizeof(data));
