@@ -2320,6 +2320,7 @@ static constexpr unsigned long long NUMBER_OF_TRIES = 10000;
 static constexpr unsigned int SOLUTION_THRESHOLD = 42;
 
 static_assert(((DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH)* NUMBER_OF_NEIGHBOR_NEURONS) % 64 == 0, "Synapse size need to be a multipler of 64");
+static_assert(NUMBER_OF_TRIES < MAX_DURATION, "Number of retries need to smaller than MAX_DURATION");
 
 struct Miner
 {
@@ -2364,6 +2365,9 @@ struct Miner
     // Save skipped ticks
     long long skipTicks[NUMBER_OF_TRIES];
 
+    // Contained all ticks possible value
+    long long ticksNumbers[MAX_DURATION];
+
 
     bool findSolution(unsigned char nonce[32])
     {
@@ -2374,6 +2378,12 @@ struct Miner
         random2(computorPublicKey, nonce, (unsigned char*)&synapses, sizeof(synapses));
 
         unsigned int score = 0;
+        long long tailTick = MAX_DURATION - 1;
+        for (long long tick = 0; tick < MAX_DURATION; tick++)
+        {
+            ticksNumbers[tick] = tick;
+        }
+
         for (long long l = 0; l < NUMBER_OF_TRIES; l++)
         {
             skipTicks[l] = -1LL;
@@ -2479,8 +2489,14 @@ struct Miner
                 }
             }
 
-            // Randomly choose a tick to skip for the next round
-            skipTick = synapses.skipTicksNumber[l] % MAX_DURATION;
+            // Randomly choose a tick to skip for the next round and avoid duplicated pick already chosen one
+            long long randomTick = synapses.skipTicksNumber[l] % (MAX_DURATION - l);
+            skipTick = ticksNumbers[randomTick];
+            // Replace the chosen tick position with current tail to make sure if this possiton is chosen again
+            // the skipTick is still not duplicated with previous ones.
+            ticksNumbers[randomTick] = ticksNumbers[tailTick];
+            tailTick--;
+
         }
 
         // Check score
