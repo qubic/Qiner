@@ -7,6 +7,10 @@
 #include <queue>
 #include <atomic>
 #include <vector>
+
+#include "ScoreParams.h"
+#include "Utils.h"
+
 #ifdef _MSC_VER
 #include <intrin.h>
 #include <winsock2.h>
@@ -2318,20 +2322,34 @@ static constexpr unsigned long long NUMBER_OF_NEIGHBOR_NEURONS = 3000;
 static constexpr unsigned long long MAX_DURATION = 3000*3000;
 static constexpr unsigned long long NUMBER_OF_OPTIMIZATION_STEPS = 100;
 static constexpr unsigned int SOLUTION_THRESHOLD = 42;
+static constexpr unsigned int MAX_NUMBER_OF_SAMPLES = 1;
+static int gThreadsCount = 1;
+static std::vector<std::vector<unsigned int>> gSampleScores;
+constexpr unsigned long long numberOfGeneratedSetting = sizeof(score_params::kSettings) / sizeof(score_params::kSettings[0]);
 
 static_assert(((DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH)* NUMBER_OF_NEIGHBOR_NEURONS) % 64 == 0, "Synapse size need to be a multipler of 64");
 static_assert(NUMBER_OF_OPTIMIZATION_STEPS < MAX_DURATION, "Number of retries need to smaller than MAX_DURATION");
 
+
+template<
+    unsigned long long dataLength,
+    unsigned long long numberOfHiddenNeurons,
+    unsigned long long numberOfNeighborNeurons,
+    unsigned long long maxDuration,
+    unsigned long long numberOfOptimizationSteps>
 struct Miner
 {
-    long long data[DATA_LENGTH];
+    static_assert(((dataLength + numberOfHiddenNeurons + dataLength)* numberOfNeighborNeurons) % 64 == 0, "Synapse size need to be a multipler of 64");
+    static_assert(numberOfOptimizationSteps < maxDuration, "Number of retries need to smaller than MAX_DURATION");
+
+    long long data[dataLength];
     unsigned char computorPublicKey[32];
     unsigned char currentRandomSeed[32];
 
     void initialize(unsigned char randomSeed[32])
     {
         random(randomSeed, randomSeed, (unsigned char*)data, sizeof(data));
-        for (unsigned long long i = 0; i < DATA_LENGTH; i++)
+        for (unsigned long long i = 0; i < dataLength; i++)
         {
             data[i] = (data[i] >= 0 ? 1 : -1);
         }
@@ -2352,39 +2370,38 @@ struct Miner
 
     struct
     {
-        long long input[DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH];
+        long long input[dataLength + numberOfHiddenNeurons + dataLength];
     } neurons;
     struct
     {
-        unsigned long long signs[(DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH) * NUMBER_OF_NEIGHBOR_NEURONS / 64];
-        unsigned long long sequence[MAX_DURATION];
+        unsigned long long signs[(dataLength + numberOfHiddenNeurons + dataLength) * numberOfNeighborNeurons / 64];
+        unsigned long long sequence[maxDuration];
         // Use for randomly select skipped ticks
-        unsigned long long skipTicksNumber[NUMBER_OF_OPTIMIZATION_STEPS];
+        unsigned long long skipTicksNumber[numberOfOptimizationSteps];
     } synapses;
 
     // Save skipped ticks
-    long long skipTicks[NUMBER_OF_OPTIMIZATION_STEPS];
+    long long skipTicks[numberOfOptimizationSteps];
 
     // Contained all ticks possible value
-    long long ticksNumbers[MAX_DURATION];
+    long long ticksNumbers[maxDuration];
 
 
-    bool findSolution(unsigned char nonce[32])
+    unsigned int computeScore(unsigned char randomSeed[32], unsigned char computorPublicKey[32], unsigned char nonce[32])
     {
-        _rdrand64_step((unsigned long long*)&nonce[0]);
-        _rdrand64_step((unsigned long long*)&nonce[8]);
-        _rdrand64_step((unsigned long long*)&nonce[16]);
-        _rdrand64_step((unsigned long long*)&nonce[24]);
+        initialize(randomSeed);
+        setComputorPublicKey(computorPublicKey);
+
         random2(computorPublicKey, nonce, (unsigned char*)&synapses, sizeof(synapses));
 
         unsigned int score = 0;
-        long long tailTick = MAX_DURATION - 1;
-        for (long long tick = 0; tick < MAX_DURATION; tick++)
+        long long tailTick = maxDuration - 1;
+        for (long long tick = 0; tick < maxDuration; tick++)
         {
             ticksNumbers[tick] = tick;
         }
 
-        for (long long l = 0; l < NUMBER_OF_OPTIMIZATION_STEPS; l++)
+        for (long long l = 0; l < numberOfOptimizationSteps; l++)
         {
             skipTicks[l] = -1LL;
         }
@@ -2404,12 +2421,12 @@ struct Miner
         // - Continue this process iteratively.
         unsigned long long numberOfSkippedTicks = 0;
         long long skipTick = -1;
-        for (long long l = 0; l < NUMBER_OF_OPTIMIZATION_STEPS; l++)
+        for (long long l = 0; l < numberOfOptimizationSteps; l++)
         {
             memset(&neurons, 0, sizeof(neurons));
             memcpy(&neurons.input[0], data, sizeof(data));
 
-            for (long long tick = 0; tick < MAX_DURATION; tick++)
+            for (long long tick = 0; tick < maxDuration; tick++)
             {
                 // Check if current tick should be skipped
                 if (tick == skipTick)
@@ -2433,18 +2450,18 @@ struct Miner
                 }
 
                 // Compute neurons
-                const unsigned long long neuronIndex = DATA_LENGTH + synapses.sequence[tick] % (NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH);
-                const unsigned long long neighborNeuronIndex = (synapses.sequence[tick] / (NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH)) % NUMBER_OF_NEIGHBOR_NEURONS;
+                const unsigned long long neuronIndex = dataLength + synapses.sequence[tick] % (numberOfHiddenNeurons + dataLength);
+                const unsigned long long neighborNeuronIndex = (synapses.sequence[tick] / (numberOfHiddenNeurons + dataLength)) % numberOfNeighborNeurons;
                 unsigned long long supplierNeuronIndex;
-                if (neighborNeuronIndex < NUMBER_OF_NEIGHBOR_NEURONS / 2)
+                if (neighborNeuronIndex < numberOfNeighborNeurons / 2)
                 {
-                    supplierNeuronIndex = (neuronIndex - (NUMBER_OF_NEIGHBOR_NEURONS / 2) + neighborNeuronIndex + (DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH)) % (DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH);
+                    supplierNeuronIndex = (neuronIndex - (numberOfNeighborNeurons / 2) + neighborNeuronIndex + (dataLength + numberOfHiddenNeurons + dataLength)) % (dataLength + numberOfHiddenNeurons + dataLength);
                 }
                 else
                 {
-                    supplierNeuronIndex = (neuronIndex + 1 - (NUMBER_OF_NEIGHBOR_NEURONS / 2) + neighborNeuronIndex + (DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH)) % (DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH);
+                    supplierNeuronIndex = (neuronIndex + 1 - (numberOfNeighborNeurons / 2) + neighborNeuronIndex + (dataLength + numberOfHiddenNeurons + dataLength)) % (dataLength + numberOfHiddenNeurons + dataLength);
                 }
-                const unsigned long long offset = neuronIndex * NUMBER_OF_NEIGHBOR_NEURONS + neighborNeuronIndex;
+                const unsigned long long offset = neuronIndex * numberOfNeighborNeurons + neighborNeuronIndex;
 
                 if (!(synapses.signs[offset / 64] & (1ULL << (offset % 64))))
                 {
@@ -2467,9 +2484,9 @@ struct Miner
 
             // Compute the score
             unsigned int currentScore = 0;
-            for (unsigned long long i = 0; i < DATA_LENGTH; i++)
+            for (unsigned long long i = 0; i < dataLength; i++)
             {
-                if (data[i] == neurons.input[DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + i])
+                if (data[i] == neurons.input[dataLength + numberOfHiddenNeurons + i])
                 {
                     currentScore++;
                 }
@@ -2498,9 +2515,14 @@ struct Miner
             tailTick--;
 
         }
+        return score;
+    }
 
+    bool findSolution(unsigned char nonce[32])
+    {
+        unsigned int score = computeScore(nonce);
         // Check score
-        if ((score >= (DATA_LENGTH / 3) + SOLUTION_THRESHOLD) || (score <= (DATA_LENGTH / 3) - SOLUTION_THRESHOLD))
+        if ((score >= (dataLength / 3) + SOLUTION_THRESHOLD) || (score <= (dataLength / 3) - SOLUTION_THRESHOLD))
         {
             return true;
         }
@@ -2577,27 +2599,59 @@ bool isZeros(const unsigned char* value)
     return true;
 }
 
-int miningThreadProc()
+// Recursive template to process each element in scoreSettings
+template <unsigned long i>
+static void processElement(unsigned char* miningSeed, unsigned char* publicKey, unsigned char* nonce, int sampleIndex)
 {
-    std::unique_ptr<Miner> miner(new Miner());
-    miner->initialize(randomSeed);
-    miner->setComputorPublicKey(computorPublicKey);
+    uint8_t publicKey32[32];
+    uint8_t nonce32[32];
+    uint8_t miningSeed32[32];
 
-    std::array<unsigned char, 32> nonce;
-    while (!state)
+    memcpy(publicKey32, publicKey, 32);
+    memcpy(nonce32, nonce, 32);
+    memcpy(miningSeed32, miningSeed, 32);
+
+    auto pScore = std::make_unique<Miner<
+        score_params::kDataLength,
+        score_params::kSettings[i][score_params::NR_NEURONS],
+        score_params::kSettings[i][score_params::NR_NEIGHBOR_NEURONS],
+        score_params::kSettings[i][score_params::DURATIONS],
+        score_params::kSettings[i][score_params::NR_OPTIMIZATION_STEPS]>>();
+
+    unsigned int score_value = pScore->computeScore(miningSeed32, publicKey32, nonce32);
+
     {
-        if (miner->findSolution(nonce.data()))
-        {
-            {
-                std::lock_guard<std::mutex> guard(foundNonceLock);
-                foundNonce.push(nonce);
-            }
-            numberOfFoundSolutions++;
-        }
-
-        numberOfMiningIterations++;
+        gSampleScores[sampleIndex][i] = score_value;
     }
-    return 0;
+}
+
+// Main processing function
+template <unsigned long N, unsigned long... Is>
+void processHelper(
+    unsigned char* miningSeed,
+    unsigned char* publicKey,
+    unsigned char* nonce,
+    int sampleIndex,
+    std::index_sequence<Is...>)
+{
+    (processElement<Is>(miningSeed, publicKey, nonce, sampleIndex), ...);
+}
+
+// Recursive template to process each element in scoreSettings
+template <unsigned long N>
+void
+process(unsigned char* miningSeed, unsigned char* publicKey, unsigned char* nonce, int sampleIndex)
+{
+    processHelper<N>(miningSeed, publicKey, nonce, sampleIndex, std::make_index_sequence<N>{});
+}
+
+void threadProc(std::vector<std::vector<uint8_t>> miningSeedVec, std::vector<std::vector<uint8_t>>  publicKeyVec, std::vector<std::vector<uint8_t>> nonceVec, int threadId)
+{
+    size_t totalSample = nonceVec.size();
+    for (int sampleId = threadId; sampleId < totalSample; sampleId += gThreadsCount)
+    {
+        process<numberOfGeneratedSetting>(&miningSeedVec[sampleId][0], &publicKeyVec[sampleId][0], &nonceVec[sampleId][0], sampleId);
+    }
 }
 
 struct ServerSocket
@@ -2745,141 +2799,90 @@ static void hexToByte(const char* hex, uint8_t* byte, const int sizeInByte)
 
 int main(int argc, char* argv[])
 {
-    std::vector<std::thread> miningThreads;
+    std::vector<std::unique_ptr<std::thread>> miningThreads;
 
-    if (argc != 6)
+    if (argc != 4)
     {
-        printf("Usage:   Qiner [Node IP] [Node Port] [Mining ID] [Mining Seed] [Number of threads]\n");
+        printf("Usage:   Qiner [SampleFile] [OutputScoreFile] [Number of threads]\n");
     }
     else
     {
-        nodeIp = argv[1];
-        nodePort = std::atoi(argv[2]);
-        char* miningID = argv[3];
-        printf("Qiner is launched. Connecting to %s:%d\n", nodeIp, nodePort);
+        std::string sampleFile = argv[1];
+        std::string outputFile = argv[2];
+        gThreadsCount = std::atoi(argv[3]);
+        printf("Qiner is launched. Sample file %s, Outputfile: %s, Threads: %d\n", sampleFile.c_str(), outputFile.c_str(), gThreadsCount);
 
-        consoleCtrlHandler();
+        // Read the parameters and results
+        auto sampleString = test_utils::readCSV(sampleFile);
 
-        if (!getPublicKeyFromIdentity((const unsigned char*)miningID, computorPublicKey))
+        // Convert the raw string and do the data verification
+        unsigned long long numberOfSamples = sampleString.size();
+        if (MAX_NUMBER_OF_SAMPLES > 0)
         {
-            printf("The Id is invalid!\n");
+            numberOfSamples = numberOfSamples > MAX_NUMBER_OF_SAMPLES ? MAX_NUMBER_OF_SAMPLES : numberOfSamples;
         }
-        else
+        printf("\t-Total samples: %llu\n", numberOfSamples);
+
+        std::vector<std::vector<uint8_t>> miningSeeds(numberOfSamples);
+        std::vector<std::vector<uint8_t>> publicKeys(numberOfSamples);
+        std::vector<std::vector<uint8_t>> nonces(numberOfSamples);
+        gSampleScores.resize(numberOfSamples);
+
+        // Reading the input samples
+        for (unsigned long long i = 0; i < numberOfSamples; ++i)
         {
-            hexToByte(argv[4], randomSeed, 32);
-            unsigned int numberOfThreads = atoi(argv[5]);
-            printf("%d threads are used.\n", numberOfThreads);
-            miningThreads.resize(numberOfThreads);
-            for (unsigned int i = numberOfThreads; i-- > 0; )
-            {
-                miningThreads.emplace_back(miningThreadProc);
-            }
-            ServerSocket serverSocket;
+            miningSeeds[i].resize(32);
+            nonces[i].resize(32);
+            publicKeys[i].resize(32);
 
-            auto timestamp = std::chrono::steady_clock::now();
-            long long prevNumberOfMiningIterations = 0;
-            while (!state)
-            {
-                bool haveNonceToSend = false;
-                size_t itemToSend = 0;
-                std::array<unsigned char, 32> sendNonce;
-                {
-                    std::lock_guard<std::mutex> guard(foundNonceLock);
-                    haveNonceToSend = foundNonce.size() > 0;
-                    if (haveNonceToSend)
-                    {
-                        sendNonce = foundNonce.front();
-                    }
-                    itemToSend = foundNonce.size();
-                }
-                if (haveNonceToSend)
-                {
-                    if (serverSocket.establishConnection(nodeIp))
-                    {
-                        struct
-                        {
-                            RequestResponseHeader header;
-                            Message message;
-                            unsigned char solutionMiningSeed[32];
-                            unsigned char solutionNonce[32];
-                            unsigned char signature[64];
-                        } packet;
+            hexToByte(sampleString[i][0].c_str(), &miningSeeds[i][0], 32);
+            hexToByte(sampleString[i][1].c_str(), &publicKeys[i][0], 32);
+            hexToByte(sampleString[i][2].c_str(), &nonces[i][0], 32);
 
-                        packet.header.setSize(sizeof(packet));
-                        packet.header.zeroDejavu();
-                        packet.header.setType(BROADCAST_MESSAGE);
-
-                        memset(packet.message.sourcePublicKey, 0, sizeof(packet.message.sourcePublicKey));
-                        memcpy(packet.message.destinationPublicKey, computorPublicKey, sizeof(packet.message.destinationPublicKey));
-
-                        unsigned char sharedKeyAndGammingNonce[64];
-                        memset(sharedKeyAndGammingNonce, 0, 32);
-                        unsigned char gammingKey[32];
-                        do
-                        {
-                            _rdrand64_step((unsigned long long*) & packet.message.gammingNonce[0]);
-                            _rdrand64_step((unsigned long long*) & packet.message.gammingNonce[8]);
-                            _rdrand64_step((unsigned long long*) & packet.message.gammingNonce[16]);
-                            _rdrand64_step((unsigned long long*) & packet.message.gammingNonce[24]);
-                            memcpy(&sharedKeyAndGammingNonce[32], packet.message.gammingNonce, 32);
-                            KangarooTwelve64To32(sharedKeyAndGammingNonce, gammingKey);
-                        } while (gammingKey[0]);
-
-                        unsigned char gamma[32 + 32];
-                        KangarooTwelve(gammingKey, sizeof(gammingKey), gamma, sizeof(gamma));
-                        for (unsigned int i = 0; i < 32; i++)
-                        {
-                            packet.solutionMiningSeed[i] = randomSeed[i] ^ gamma[i];
-                            packet.solutionNonce[i] = sendNonce[i] ^ gamma[i + 32];
-                        }
-
-                        _rdrand64_step((unsigned long long*) & packet.signature[0]);
-                        _rdrand64_step((unsigned long long*) & packet.signature[8]);
-                        _rdrand64_step((unsigned long long*) & packet.signature[16]);
-                        _rdrand64_step((unsigned long long*) & packet.signature[24]);
-                        _rdrand64_step((unsigned long long*) & packet.signature[32]);
-                        _rdrand64_step((unsigned long long*) & packet.signature[40]);
-                        _rdrand64_step((unsigned long long*) & packet.signature[48]);
-                        _rdrand64_step((unsigned long long*) & packet.signature[56]);
-
-                        if (serverSocket.sendData((char*)&packet, packet.header.size()))
-                        {
-                            std::lock_guard<std::mutex> guard(foundNonceLock);
-                            // Send data successfully. Remove it from the queue
-                            foundNonce.pop();
-                            itemToSend = foundNonce.size();
-                        }
-                        serverSocket.closeConnection();
-                    }
-                }
-
-                std::this_thread::sleep_for(std::chrono::duration < double, std::milli>(1000));
-
-                unsigned long long delta = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - timestamp).count();
-                if (delta >= 1000)
-                {
-                    // Get current time in UTC
-                    std::time_t now_time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-                    std::tm* utc_time = std::gmtime(&now_time);
-                    printf("|   %04d-%02d-%02d %02d:%02d:%02d   |   %llu it/s   |   %d solutions   |   %.10s...   |\n",
-                        utc_time->tm_year + 1900, utc_time->tm_mon, utc_time->tm_mday, utc_time->tm_hour, utc_time->tm_min, utc_time->tm_sec,
-                        (numberOfMiningIterations - prevNumberOfMiningIterations) * 1000 / delta, numberOfFoundSolutions.load(), miningID);
-                    prevNumberOfMiningIterations = numberOfMiningIterations;
-                    timestamp = std::chrono::steady_clock::now();
-                }
-            }
+            gSampleScores[i].resize(sizeof(score_params::kSettings) / sizeof(score_params::kSettings[0]));
         }
-        printf("Shutting down...Press Ctrl+C again to force stop.\n");
+
+        // Lauching the threads
+        miningThreads.resize(gThreadsCount);
+        for (int i = 0; i < gThreadsCount; i++)
+        {
+            miningThreads[i].reset(new std::thread(threadProc, miningSeeds, publicKeys, nonces, i));
+        }
+
 
         // Wait for all threads to join
         for (auto& miningTh : miningThreads)
         {
-            if (miningTh.joinable())
+            if (miningTh->joinable())
             {
-                miningTh.join();
+                miningTh->join();
             }
         }
+
+        // Save data
+        // Write to a general file
+        std::ofstream scoreFile;
+        scoreFile.open(outputFile);
+        if (!scoreFile.is_open())
+        {
+            return 1;
+        }
+        for (int i = 0; i < numberOfSamples; i++)
+        {
+            for (int j = 0; j < numberOfGeneratedSetting; j++)
+            {
+                scoreFile << gSampleScores[i][j];
+                if (j < numberOfGeneratedSetting - 1)
+                {
+                    scoreFile << ", ";
+                }
+            }
+            scoreFile << std::endl;
+        }
+        scoreFile.close();
+
         printf("Qiner is shut down.\n");
+
     }
 
     return 0;

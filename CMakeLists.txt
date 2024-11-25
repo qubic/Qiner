@@ -35,6 +35,9 @@ endif()
 # Main executable
 add_executable(${PROJECT_NAME} src/Qiner.cpp)
 
+# Include
+include_directories(.)
+
 # Linking
 if(WIN32)
     target_link_libraries(${PROJECT_NAME} wsock32 ws2_32)
