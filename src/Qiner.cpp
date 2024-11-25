@@ -2803,14 +2803,14 @@ int main(int argc, char* argv[])
 
     if (argc != 4)
     {
-        printf("Usage:   Qiner [SampleFile] [OutputScoreFile] [Number of threads]\n");
+        printf("Usage:   Qiner [SampleFile] [ComparedScoreFile] [Number of threads]\n");
     }
     else
     {
         std::string sampleFile = argv[1];
-        std::string outputFile = argv[2];
+        std::string scoreFile = argv[2];
         gThreadsCount = std::atoi(argv[3]);
-        printf("Qiner is launched. Sample file %s, Outputfile: %s, Threads: %d\n", sampleFile.c_str(), outputFile.c_str(), gThreadsCount);
+        printf("Qiner is launched. Sample file %s, Outputfile: %s, Threads: %d\n", sampleFile.c_str(), scoreFile.c_str(), gThreadsCount);
 
         // Read the parameters and results
         auto sampleString = test_utils::readCSV(sampleFile);
@@ -2849,7 +2849,6 @@ int main(int argc, char* argv[])
             miningThreads[i].reset(new std::thread(threadProc, miningSeeds, publicKeys, nonces, i));
         }
 
-
         // Wait for all threads to join
         for (auto& miningTh : miningThreads)
         {
@@ -2859,27 +2858,33 @@ int main(int argc, char* argv[])
             }
         }
 
-        // Save data
-        // Write to a general file
-        std::ofstream scoreFile;
-        scoreFile.open(outputFile);
-        if (!scoreFile.is_open())
+        // Verify data
+        std::vector<std::vector<unsigned int>> gtScores(numberOfSamples);
+
+         // Read the parameters and results
+        auto scoreStrings = test_utils::readCSV(scoreFile);
+
+        // Reading the score for each samples, the first line is the setting
+        for (unsigned long long i = 1; i < numberOfSamples; ++i)
         {
-            return 1;
+            for (int j = 0; j < scoreStrings[i].size(); j++)
+            {
+                gtScores[i].push_back(std::atoi(scoreStrings[i][j].c_str()));
+            }
         }
-        for (int i = 0; i < numberOfSamples; i++)
+
+        // Verified score
+        for (unsigned long long i = 1; i < numberOfSamples; ++i)
         {
             for (int j = 0; j < numberOfGeneratedSetting; j++)
             {
-                scoreFile << gSampleScores[i][j];
-                if (j < numberOfGeneratedSetting - 1)
+                if (gSampleScores[i][j] != gtScores[i][j])
                 {
-                    scoreFile << ", ";
+                    printf("Score mismatched. %u vs %u \n", gSampleScores[i][j], gtScores[i][j]);
+                    return 1;
                 }
             }
-            scoreFile << std::endl;
         }
-        scoreFile.close();
 
         printf("Qiner is shut down.\n");
 
