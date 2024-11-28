@@ -2317,7 +2317,7 @@ static constexpr unsigned long long NUMBER_OF_HIDDEN_NEURONS = 3000;
 static constexpr unsigned long long NUMBER_OF_NEIGHBOR_NEURONS = 3000;
 static constexpr unsigned long long MAX_DURATION = 3000*3000;
 static constexpr unsigned long long NUMBER_OF_OPTIMIZATION_STEPS = 100;
-static constexpr unsigned int SOLUTION_THRESHOLD = 42;
+static constexpr unsigned int SOLUTION_THRESHOLD = 130;
 
 static_assert(((DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH)* NUMBER_OF_NEIGHBOR_NEURONS) % 64 == 0, "Synapse size need to be a multipler of 64");
 static_assert(NUMBER_OF_OPTIMIZATION_STEPS < MAX_DURATION, "Number of retries need to smaller than MAX_DURATION");
@@ -2492,7 +2492,7 @@ struct Miner
             // Randomly choose a tick to skip for the next round and avoid duplicated pick already chosen one
             long long randomTick = synapses.skipTicksNumber[l] % (MAX_DURATION - l);
             skipTick = ticksNumbers[randomTick];
-            // Replace the chosen tick position with current tail to make sure if this possiton is chosen again
+            // Replace the chosen tick position with current tail to make sure if this tick is not chosen again
             // the skipTick is still not duplicated with previous ones.
             ticksNumbers[randomTick] = ticksNumbers[tailTick];
             tailTick--;
@@ -2500,7 +2500,7 @@ struct Miner
         }
 
         // Check score
-        if ((score >= (DATA_LENGTH / 3) + SOLUTION_THRESHOLD) || (score <= (DATA_LENGTH / 3) - SOLUTION_THRESHOLD))
+        if (score >= SOLUTION_THRESHOLD)
         {
             return true;
         }
