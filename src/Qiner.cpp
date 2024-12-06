@@ -2313,12 +2313,14 @@ typedef struct
 char* nodeIp = NULL;
 int nodePort = 0;
 static constexpr unsigned long long DATA_LENGTH = 256;
-static constexpr unsigned long long NUMBER_OF_HIDDEN_NEURONS = 24000;
-static constexpr unsigned long long NUMBER_OF_NEIGHBOR_NEURONS = 10000;
-static constexpr unsigned long long MAX_DURATION = 5000000;
-static constexpr unsigned int SOLUTION_THRESHOLD = 42;
+static constexpr unsigned long long NUMBER_OF_HIDDEN_NEURONS = 3000;
+static constexpr unsigned long long NUMBER_OF_NEIGHBOR_NEURONS = 3000;
+static constexpr unsigned long long MAX_DURATION = 3000*3000;
+static constexpr unsigned long long NUMBER_OF_OPTIMIZATION_STEPS = 100;
+static constexpr unsigned int SOLUTION_THRESHOLD = 130;
 
 static_assert(((DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH)* NUMBER_OF_NEIGHBOR_NEURONS) % 64 == 0, "Synapse size need to be a multipler of 64");
+static_assert(NUMBER_OF_OPTIMIZATION_STEPS < MAX_DURATION, "Number of retries need to smaller than MAX_DURATION");
 
 struct Miner
 {
@@ -2356,64 +2358,154 @@ struct Miner
     {
         unsigned long long signs[(DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH) * NUMBER_OF_NEIGHBOR_NEURONS / 64];
         unsigned long long sequence[MAX_DURATION];
+        // Use for randomly select skipped ticks
+        unsigned long long skipTicksNumber[NUMBER_OF_OPTIMIZATION_STEPS];
     } synapses;
+
+    // Save skipped ticks
+    long long skipTicks[NUMBER_OF_OPTIMIZATION_STEPS];
+
+    // Contained all ticks possible value
+    long long ticksNumbers[MAX_DURATION];
+
 
     bool findSolution(unsigned char nonce[32])
     {
-        memset(&neurons, 0, sizeof(neurons));
         _rdrand64_step((unsigned long long*)&nonce[0]);
         _rdrand64_step((unsigned long long*)&nonce[8]);
         _rdrand64_step((unsigned long long*)&nonce[16]);
         _rdrand64_step((unsigned long long*)&nonce[24]);
         random2(computorPublicKey, nonce, (unsigned char*)&synapses, sizeof(synapses));
 
-        memcpy(&neurons.input[0], data, sizeof(data));
-
+        unsigned int score = 0;
+        long long tailTick = MAX_DURATION - 1;
         for (long long tick = 0; tick < MAX_DURATION; tick++)
         {
-            const unsigned long long neuronIndex = DATA_LENGTH + synapses.sequence[tick] % (NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH);
-            const unsigned long long neighborNeuronIndex = (synapses.sequence[tick] / (NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH)) % NUMBER_OF_NEIGHBOR_NEURONS;
-            unsigned long long supplierNeuronIndex;
-            if (neighborNeuronIndex < NUMBER_OF_NEIGHBOR_NEURONS / 2)
-            {
-                supplierNeuronIndex = (neuronIndex - (NUMBER_OF_NEIGHBOR_NEURONS / 2) + neighborNeuronIndex + (DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH)) % (DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH);
-            }
-            else
-            {
-                supplierNeuronIndex = (neuronIndex + 1 - (NUMBER_OF_NEIGHBOR_NEURONS / 2) + neighborNeuronIndex + (DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH)) % (DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH);
-            }
-            const unsigned long long offset = neuronIndex * NUMBER_OF_NEIGHBOR_NEURONS + neighborNeuronIndex;
-
-            if (!(synapses.signs[offset / 64] & (1ULL << (offset % 64))))
-            {
-                neurons.input[neuronIndex] += neurons.input[supplierNeuronIndex];
-            }
-            else
-            {
-                neurons.input[neuronIndex] -= neurons.input[supplierNeuronIndex];
-            }
-
-            if (neurons.input[neuronIndex] > 1)
-            {
-                neurons.input[neuronIndex] = 1;
-            }
-            if (neurons.input[neuronIndex] < -1)
-            {
-                neurons.input[neuronIndex] = -1;
-            }
+            ticksNumbers[tick] = tick;
         }
 
-        unsigned int score = 0;
-
-        for (unsigned long long i = 0; i < DATA_LENGTH; i++)
+        for (long long l = 0; l < NUMBER_OF_OPTIMIZATION_STEPS; l++)
         {
-            if (data[i] == neurons.input[DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + i])
-            {
-                score++;
-            }
+            skipTicks[l] = -1LL;
         }
 
-        return (score >= (DATA_LENGTH / 3) + SOLUTION_THRESHOLD) || (score <= (DATA_LENGTH / 3) - SOLUTION_THRESHOLD);
+        // Calculate the score with a list of randomly skipped ticks. This list grows if an additional skipped tick
+        // does not worsen the score compared to the previous one.
+        // - Initialize skippedTicks = []
+        // - First, use all ticks. Compute score0 and update the score with score0.
+        // - In the second run, ignore ticks in skippedTicks and try skipping a random tick 'a'.
+        //    + Compute score1.
+        //    + If score1 is not worse than score, add tick 'a' to skippedTicks and update the score with score1.
+        //    + Otherwise, ignore tick 'a'.
+        // - In the third run, ignore ticks in skippedTicks and try skipping a random tick 'b'.
+        //    + Compute score2.
+        //    + If score2 is not worse than score, add tick 'b' to skippedTicks and update the score with score2.
+        //    + Otherwise, ignore tick 'b'.
+        // - Continue this process iteratively.
+        unsigned long long numberOfSkippedTicks = 0;
+        long long skipTick = -1;
+        for (long long l = 0; l < NUMBER_OF_OPTIMIZATION_STEPS; l++)
+        {
+            memset(&neurons, 0, sizeof(neurons));
+            memcpy(&neurons.input[0], data, sizeof(data));
+
+            for (long long tick = 0; tick < MAX_DURATION; tick++)
+            {
+                // Check if current tick should be skipped
+                if (tick == skipTick)
+                {
+                    continue;
+                }
+
+                // Skip recorded skipped ticks
+                bool tickShouldBeSkipped = false;
+                for (long long tickIdx = 0; tickIdx < numberOfSkippedTicks; tickIdx++)
+                {
+                    if (skipTicks[tickIdx] == tick)
+                    {
+                        tickShouldBeSkipped = true;
+                        break;
+                    }
+                }
+                if (tickShouldBeSkipped)
+                {
+                    continue;
+                }
+
+                // Compute neurons
+                const unsigned long long neuronIndex = DATA_LENGTH + synapses.sequence[tick] % (NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH);
+                const unsigned long long neighborNeuronIndex = (synapses.sequence[tick] / (NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH)) % NUMBER_OF_NEIGHBOR_NEURONS;
+                unsigned long long supplierNeuronIndex;
+                if (neighborNeuronIndex < NUMBER_OF_NEIGHBOR_NEURONS / 2)
+                {
+                    supplierNeuronIndex = (neuronIndex - (NUMBER_OF_NEIGHBOR_NEURONS / 2) + neighborNeuronIndex + (DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH)) % (DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH);
+                }
+                else
+                {
+                    supplierNeuronIndex = (neuronIndex + 1 - (NUMBER_OF_NEIGHBOR_NEURONS / 2) + neighborNeuronIndex + (DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH)) % (DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH);
+                }
+                const unsigned long long offset = neuronIndex * NUMBER_OF_NEIGHBOR_NEURONS + neighborNeuronIndex;
+
+                if (!(synapses.signs[offset / 64] & (1ULL << (offset % 64))))
+                {
+                    neurons.input[neuronIndex] += neurons.input[supplierNeuronIndex];
+                }
+                else
+                {
+                    neurons.input[neuronIndex] -= neurons.input[supplierNeuronIndex];
+                }
+
+                if (neurons.input[neuronIndex] > 1)
+                {
+                    neurons.input[neuronIndex] = 1;
+                }
+                if (neurons.input[neuronIndex] < -1)
+                {
+                    neurons.input[neuronIndex] = -1;
+                }
+            }
+
+            // Compute the score
+            unsigned int currentScore = 0;
+            for (unsigned long long i = 0; i < DATA_LENGTH; i++)
+            {
+                if (data[i] == neurons.input[DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + i])
+                {
+                    currentScore++;
+                }
+            }
+
+            // Update score if below satisfied
+            // - This is the first run without skipping any ticks
+            // - Current score is not worse than previous score
+            if (skipTick == -1 || currentScore >= score)
+            {
+                score = currentScore;
+                // For the first run, don't need to update the skipped ticks list
+                if (skipTick != -1 )
+                {
+                    skipTicks[numberOfSkippedTicks] = skipTick;
+                    numberOfSkippedTicks++;
+                }
+            }
+
+            // Randomly choose a tick to skip for the next round and avoid duplicated pick already chosen one
+            long long randomTick = synapses.skipTicksNumber[l] % (MAX_DURATION - l);
+            skipTick = ticksNumbers[randomTick];
+            // Replace the chosen tick position with current tail to make sure if this tick is not chosen again
+            // the skipTick is still not duplicated with previous ones.
+            ticksNumbers[randomTick] = ticksNumbers[tailTick];
+            tailTick--;
+
+        }
+
+        // Check score
+        if (score >= SOLUTION_THRESHOLD)
+        {
+            return true;
+        }
+
+        return false;
     }
 };
 
