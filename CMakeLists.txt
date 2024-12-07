@@ -19,13 +19,13 @@ else()
 endif()
 
 # Main executable
-add_executable(${PROJECT_NAME} src/Qiner.cpp src/keyUtils.cpp)
+add_executable(broadcastMessageSolution src/Qiner.cpp src/keyUtils.cpp)
 
-include_directories(${PROJECT_NAME} ./src)
+include_directories(broadcastMessageSolution ./src)
 
 # Linking
 if(WIN32)
-    target_link_libraries(${PROJECT_NAME} wsock32 ws2_32)
+    target_link_libraries(broadcastMessageSolution wsock32 ws2_32)
 else()
-    target_link_libraries(${PROJECT_NAME} pthread)
+    target_link_libraries(broadcastMessageSolution pthread)
 endif()
