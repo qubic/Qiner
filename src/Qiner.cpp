@@ -146,8 +146,8 @@ static constexpr unsigned long long DATA_LENGTH = 256;
 static constexpr unsigned long long NUMBER_OF_HIDDEN_NEURONS = 3000;
 static constexpr unsigned long long NUMBER_OF_NEIGHBOR_NEURONS = 3000;
 static constexpr unsigned long long MAX_DURATION = 3000*3000;
-static constexpr unsigned long long NUMBER_OF_OPTIMIZATION_STEPS = 100;
-static constexpr unsigned int SOLUTION_THRESHOLD = 130;
+static constexpr unsigned long long NUMBER_OF_OPTIMIZATION_STEPS = 30;
+static constexpr unsigned int SOLUTION_THRESHOLD = 87;
 
 static_assert(((DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH)* NUMBER_OF_NEIGHBOR_NEURONS) % 64 == 0, "Synapse size need to be a multipler of 64");
 static_assert(NUMBER_OF_OPTIMIZATION_STEPS < MAX_DURATION, "Number of retries need to smaller than MAX_DURATION");
@@ -556,34 +556,38 @@ static void hexToByte(const char* hex, uint8_t* byte, const int sizeInByte)
 int main(int argc, char* argv[])
 {
     std::vector<std::thread> miningThreads;
-    if (argc != 6)
+    if (argc != 7)
     {
-        printf("Usage:   Qiner [Node IP] [Node Port] [Seed] [Mining Seed] [Number of threads]\n");
+        printf("Usage:   Qiner [Node IP] [Node Port] [MiningID] [Signing Seed] [Mining Seed] [Number of threads]\n");
     }
     else
     {
         nodeIp = argv[1];
         nodePort = std::atoi(argv[2]);
-        char miningID[61];
+        char* miningID = argv[3];
         printf("Qiner is launched. Connecting to %s:%d\n", nodeIp, nodePort);
 
         consoleCtrlHandler();
 
         {
+            getPublicKeyFromIdentity(miningID, computorPublicKey);
+
             // Data for signing the solution
-            char* seed = argv[3];
-            unsigned char privateKey[32];
-            unsigned char subseed[32];
+            char* signingSeed = argv[4];
+            unsigned char signingPrivateKey[32];
+            unsigned char signingSubseed[32];
+            unsigned char signingPublicKey[32];
             char privateKeyQubicFormat[128] = {0};
             char publicKeyQubicFormat[128] = {0};
             char publicIdentity[128] = {0};
-            getSubseedFromSeed((unsigned char*)seed, subseed);
-            getPrivateKeyFromSubSeed(subseed, privateKey);
-            getPublicKeyFromPrivateKey(privateKey, computorPublicKey);
-            getIdentityFromPublicKey(computorPublicKey, miningID, false);
+            getSubseedFromSeed((unsigned char*)signingSeed, signingSubseed);
+            getPrivateKeyFromSubSeed(signingSubseed, signingPrivateKey);
+            getPublicKeyFromPrivateKey(signingPrivateKey, signingPublicKey);
 
-            hexToByte(argv[4], randomSeed, 32);
-            unsigned int numberOfThreads = atoi(argv[5]);
+            //getIdentityFromPublicKey(signingPublicKey, miningID, false);
+
+            hexToByte(argv[5], randomSeed, 32);
+            unsigned int numberOfThreads = atoi(argv[6]);
             printf("%d threads are used.\n", numberOfThreads);
             miningThreads.resize(numberOfThreads);
             for (unsigned int i = numberOfThreads; i-- > 0; )
@@ -626,12 +630,17 @@ int main(int argc, char* argv[])
                         packet.header.setType(BROADCAST_MESSAGE);
 
                         // Source and destination is the same
-                        memcpy(packet.message.sourcePublicKey, computorPublicKey, sizeof(packet.message.sourcePublicKey));
+                        memcpy(packet.message.sourcePublicKey, signingPublicKey, sizeof(packet.message.sourcePublicKey));
                         memcpy(packet.message.destinationPublicKey, computorPublicKey, sizeof(packet.message.destinationPublicKey));
 
                         unsigned char sharedKeyAndGammingNonce[64];
                         // First 32 bytes is the shared key
-                        getSharedKey(privateKey, computorPublicKey, sharedKeyAndGammingNonce);
+                        memset(sharedKeyAndGammingNonce, 0, 32);
+                        // If provided seed is the for computor public key. Encrypt the message
+                        if (memcmp(computorPublicKey, signingPublicKey, 32) == 0)
+                        {
+                            getSharedKey(signingPrivateKey, computorPublicKey, sharedKeyAndGammingNonce);
+                        }
                         unsigned char gammingKey[32];
                         do
                         {
@@ -659,7 +668,7 @@ int main(int argc, char* argv[])
                             sizeof(packet) - sizeof(RequestResponseHeader) - 64,
                             digest,
                             32);
-                        sign(subseed, computorPublicKey, digest, signature);
+                        sign(signingSubseed, signingPublicKey, digest, signature);
                         memcpy(packet.signature, signature, 64);
 
                         // Send message
