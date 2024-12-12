@@ -629,18 +629,19 @@ int main(int argc, char* argv[])
                         packet.header.zeroDejavu();
                         packet.header.setType(BROADCAST_MESSAGE);
 
-                        // Source and destination is the same
                         memcpy(packet.message.sourcePublicKey, signingPublicKey, sizeof(packet.message.sourcePublicKey));
                         memcpy(packet.message.destinationPublicKey, computorPublicKey, sizeof(packet.message.destinationPublicKey));
 
                         unsigned char sharedKeyAndGammingNonce[64];
-                        // First 32 bytes is the shared key
+                        // Default behavior when provided seed is just a signing address
+                        // first 32 bytes of sharedKeyAndGammingNonce is set as zeros
                         memset(sharedKeyAndGammingNonce, 0, 32);
-                        // If provided seed is the for computor public key. Encrypt the message
+                        // If provided seed is the for computor public key, generate sharedKey into first 32 bytes to encrypt message
                         if (memcmp(computorPublicKey, signingPublicKey, 32) == 0)
                         {
                             getSharedKey(signingPrivateKey, computorPublicKey, sharedKeyAndGammingNonce);
                         }
+                        // Last 32 bytes of sharedKeyAndGammingNonce is randomly created so that gammingKey[0] = 0 (MESSAGE_TYPE_SOLUTION)
                         unsigned char gammingKey[32];
                         do
                         {
@@ -652,6 +653,7 @@ int main(int argc, char* argv[])
                             KangarooTwelve(sharedKeyAndGammingNonce, 64, gammingKey, 32);
                         } while (gammingKey[0]);
 
+                        // Encrypt the message payload
                         unsigned char gamma[32 + 32];
                         KangarooTwelve(gammingKey, sizeof(gammingKey), gamma, sizeof(gamma));
                         for (unsigned int i = 0; i < 32; i++)
