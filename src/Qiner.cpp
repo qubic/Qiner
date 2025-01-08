@@ -556,9 +556,9 @@ static void hexToByte(const char* hex, uint8_t* byte, const int sizeInByte)
 int main(int argc, char* argv[])
 {
     std::vector<std::thread> miningThreads;
-    if (argc != 7)
+    if (argc < 7 || argc > 8)
     {
-        printf("Usage:   Qiner [Node IP] [Node Port] [MiningID] [Signing Seed] [Mining Seed] [Number of threads]\n");
+        printf("Usage:   Qiner [Node IP] [Node Port] [MiningID] [Signing Seed] [Mining Seed] [Number of Threads] [Message Type = 0]\n");
     }
     else
     {
@@ -594,6 +594,11 @@ int main(int argc, char* argv[])
             {
                 miningThreads.emplace_back(miningThreadProc);
             }
+
+            unsigned char messageType = 0;
+            if (argc > 7)
+                messageType = std::atoi(argv[7]);
+
             ServerSocket serverSocket;
 
             auto timestamp = std::chrono::steady_clock::now();
@@ -641,7 +646,7 @@ int main(int argc, char* argv[])
                         {
                             getSharedKey(signingPrivateKey, computorPublicKey, sharedKeyAndGammingNonce);
                         }
-                        // Last 32 bytes of sharedKeyAndGammingNonce is randomly created so that gammingKey[0] = 0 (MESSAGE_TYPE_SOLUTION)
+                        // Last 32 bytes of sharedKeyAndGammingNonce is randomly created so that gammingKey[0] = messageType (MESSAGE_TYPE_SOLUTION = 0, MESSAGE_TYPE_CUSTOM_MINING_SOLUTION = 2)
                         unsigned char gammingKey[32];
                         do
                         {
@@ -651,7 +656,7 @@ int main(int argc, char* argv[])
                             _rdrand64_step((unsigned long long*) & packet.message.gammingNonce[24]);
                             memcpy(&sharedKeyAndGammingNonce[32], packet.message.gammingNonce, 32);
                             KangarooTwelve(sharedKeyAndGammingNonce, 64, gammingKey, 32);
-                        } while (gammingKey[0]);
+                        } while (gammingKey[0] != messageType);
 
                         // Encrypt the message payload
                         unsigned char gamma[32 + 32];
