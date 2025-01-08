@@ -337,7 +337,7 @@ static void hexToByte(const char* hex, uint8_t* byte, const int sizeInByte)
 int main(int argc, char* argv[])
 {
     std::vector<std::thread> miningThreads;
-    if (argc != 7)
+    if (argc < 7 || argc > 8)
     {
         printf("Usage:   Qiner [Node IP] [Node Port] [MiningID] [Signing Seed] [Mining Seed] [Nonces] [Message Type = 0]\n");
     }
