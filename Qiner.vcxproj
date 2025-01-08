@@ -19,7 +19,12 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\keyUtils.cpp" />
     <ClCompile Include="src\Qiner.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\K12AndKeyUtil.h" />
+    <ClInclude Include="src\keyUtils.h" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
