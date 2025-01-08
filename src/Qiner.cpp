@@ -339,7 +339,7 @@ int main(int argc, char* argv[])
     std::vector<std::thread> miningThreads;
     if (argc != 7)
     {
-        printf("Usage:   Qiner [Node IP] [Node Port] [MiningID] [Signing Seed] [Mining Seed] [Nonces]\n");
+        printf("Usage:   Qiner [Node IP] [Node Port] [MiningID] [Signing Seed] [Mining Seed] [Nonces] [Message Type = 0]\n");
     }
     else
     {
@@ -367,6 +367,10 @@ int main(int argc, char* argv[])
             unsigned char nonce[32];
             hexToByte(argv[5], randomSeed, 32);
             hexToByte(argv[6], nonce, 32);
+
+            unsigned char messageType = 0;
+            if (argc > 7)
+                messageType = std::atoi(argv[7]);
 
             struct
             {
@@ -403,7 +407,7 @@ int main(int argc, char* argv[])
                 _rdrand64_step((unsigned long long*) & packet.message.gammingNonce[24]);
                 memcpy(&sharedKeyAndGammingNonce[32], packet.message.gammingNonce, 32);
                 KangarooTwelve(sharedKeyAndGammingNonce, 64, gammingKey, 32);
-            } while (gammingKey[0]);
+            } while (gammingKey[0] != messageType);
 
             unsigned char gamma[32 + 32];
             KangarooTwelve(gammingKey, sizeof(gammingKey), gamma, sizeof(gamma));
