@@ -555,7 +555,6 @@ static void hexToByte(const char* hex, uint8_t* byte, const int sizeInByte)
 
 int main(int argc, char* argv[])
 {
-    std::vector<std::thread> miningThreads;
     if (argc < 7 || argc > 8)
     {
         printf("Usage:   Qiner [Node IP] [Node Port] [MiningID] [Signing Seed] [Mining Seed] [Number of Threads] [Message Type = 0]\n");
@@ -587,133 +586,75 @@ int main(int argc, char* argv[])
             //getIdentityFromPublicKey(signingPublicKey, miningID, false);
 
             hexToByte(argv[5], randomSeed, 32);
-            unsigned int numberOfThreads = atoi(argv[6]);
-            printf("%d threads are used.\n", numberOfThreads);
-            miningThreads.resize(numberOfThreads);
-            for (unsigned int i = numberOfThreads; i-- > 0; )
-            {
-                miningThreads.emplace_back(miningThreadProc);
-            }
 
             unsigned char messageType = 0;
             if (argc > 7)
                 messageType = std::atoi(argv[7]);
 
             ServerSocket serverSocket;
-
-            auto timestamp = std::chrono::steady_clock::now();
-            long long prevNumberOfMiningIterations = 0;
-            while (!state)
+            std::array<unsigned char, 32> sendNonce; // dummy nonce
+            if (serverSocket.establishConnection(nodeIp))
             {
-                bool haveNonceToSend = false;
-                size_t itemToSend = 0;
-                std::array<unsigned char, 32> sendNonce;
+                struct
                 {
-                    std::lock_guard<std::mutex> guard(foundNonceLock);
-                    haveNonceToSend = foundNonce.size() > 0;
-                    if (haveNonceToSend)
-                    {
-                        sendNonce = foundNonce.front();
-                    }
-                    itemToSend = foundNonce.size();
+                    RequestResponseHeader header;
+                    Message message;
+                    unsigned char solutionMiningSeed[32];
+                    unsigned char solutionNonce[32];
+                    unsigned char signature[64];
+                } packet;
+
+                packet.header.setSize(sizeof(packet));
+                packet.header.zeroDejavu();
+                packet.header.setType(BROADCAST_MESSAGE);
+
+                memcpy(packet.message.sourcePublicKey, signingPublicKey, sizeof(packet.message.sourcePublicKey));
+                memcpy(packet.message.destinationPublicKey, computorPublicKey, sizeof(packet.message.destinationPublicKey));
+
+                unsigned char sharedKeyAndGammingNonce[64];
+                // Default behavior when provided seed is just a signing address
+                // first 32 bytes of sharedKeyAndGammingNonce is set as zeros
+                memset(sharedKeyAndGammingNonce, 0, 32);
+                // If provided seed is the for computor public key, generate sharedKey into first 32 bytes to encrypt message
+                if (memcmp(computorPublicKey, signingPublicKey, 32) == 0)
+                {
+                    getSharedKey(signingPrivateKey, computorPublicKey, sharedKeyAndGammingNonce);
                 }
-                if (haveNonceToSend)
+                // Last 32 bytes of sharedKeyAndGammingNonce is randomly created so that gammingKey[0] = messageType (MESSAGE_TYPE_SOLUTION = 0, MESSAGE_TYPE_CUSTOM_MINING_SOLUTION = 2)
+                unsigned char gammingKey[32];
+                do
                 {
-                    if (serverSocket.establishConnection(nodeIp))
-                    {
-                        struct
-                        {
-                            RequestResponseHeader header;
-                            Message message;
-                            unsigned char solutionMiningSeed[32];
-                            unsigned char solutionNonce[32];
-                            unsigned char signature[64];
-                        } packet;
+                    _rdrand64_step((unsigned long long*) & packet.message.gammingNonce[0]);
+                    _rdrand64_step((unsigned long long*) & packet.message.gammingNonce[8]);
+                    _rdrand64_step((unsigned long long*) & packet.message.gammingNonce[16]);
+                    _rdrand64_step((unsigned long long*) & packet.message.gammingNonce[24]);
+                    memcpy(&sharedKeyAndGammingNonce[32], packet.message.gammingNonce, 32);
+                    KangarooTwelve(sharedKeyAndGammingNonce, 64, gammingKey, 32);
+                } while (gammingKey[0] != messageType);
 
-                        packet.header.setSize(sizeof(packet));
-                        packet.header.zeroDejavu();
-                        packet.header.setType(BROADCAST_MESSAGE);
-
-                        memcpy(packet.message.sourcePublicKey, signingPublicKey, sizeof(packet.message.sourcePublicKey));
-                        memcpy(packet.message.destinationPublicKey, computorPublicKey, sizeof(packet.message.destinationPublicKey));
-
-                        unsigned char sharedKeyAndGammingNonce[64];
-                        // Default behavior when provided seed is just a signing address
-                        // first 32 bytes of sharedKeyAndGammingNonce is set as zeros
-                        memset(sharedKeyAndGammingNonce, 0, 32);
-                        // If provided seed is the for computor public key, generate sharedKey into first 32 bytes to encrypt message
-                        if (memcmp(computorPublicKey, signingPublicKey, 32) == 0)
-                        {
-                            getSharedKey(signingPrivateKey, computorPublicKey, sharedKeyAndGammingNonce);
-                        }
-                        // Last 32 bytes of sharedKeyAndGammingNonce is randomly created so that gammingKey[0] = messageType (MESSAGE_TYPE_SOLUTION = 0, MESSAGE_TYPE_CUSTOM_MINING_SOLUTION = 2)
-                        unsigned char gammingKey[32];
-                        do
-                        {
-                            _rdrand64_step((unsigned long long*) & packet.message.gammingNonce[0]);
-                            _rdrand64_step((unsigned long long*) & packet.message.gammingNonce[8]);
-                            _rdrand64_step((unsigned long long*) & packet.message.gammingNonce[16]);
-                            _rdrand64_step((unsigned long long*) & packet.message.gammingNonce[24]);
-                            memcpy(&sharedKeyAndGammingNonce[32], packet.message.gammingNonce, 32);
-                            KangarooTwelve(sharedKeyAndGammingNonce, 64, gammingKey, 32);
-                        } while (gammingKey[0] != messageType);
-
-                        // Encrypt the message payload
-                        unsigned char gamma[32 + 32];
-                        KangarooTwelve(gammingKey, sizeof(gammingKey), gamma, sizeof(gamma));
-                        for (unsigned int i = 0; i < 32; i++)
-                        {
-                            packet.solutionMiningSeed[i] = randomSeed[i] ^ gamma[i];
-                            packet.solutionNonce[i] = sendNonce[i] ^ gamma[i + 32];
-                        }
-
-                        // Sign the message
-                        uint8_t digest[32] = {0};
-                        uint8_t signature[64] = {0};
-                        KangarooTwelve(
-                            (unsigned char*)&packet + sizeof(RequestResponseHeader),
-                            sizeof(packet) - sizeof(RequestResponseHeader) - 64,
-                            digest,
-                            32);
-                        sign(signingSubseed, signingPublicKey, digest, signature);
-                        memcpy(packet.signature, signature, 64);
-
-                        // Send message
-                        if (serverSocket.sendData((char*)&packet, packet.header.size()))
-                        {
-                            std::lock_guard<std::mutex> guard(foundNonceLock);
-                            // Send data successfully. Remove it from the queue
-                            foundNonce.pop();
-                            itemToSend = foundNonce.size();
-                        }
-                        serverSocket.closeConnection();
-                    }
+                // Encrypt the message payload
+                unsigned char gamma[32 + 32];
+                KangarooTwelve(gammingKey, sizeof(gammingKey), gamma, sizeof(gamma));
+                for (unsigned int i = 0; i < 32; i++)
+                {
+                    packet.solutionMiningSeed[i] = randomSeed[i] ^ gamma[i];
+                    packet.solutionNonce[i] = sendNonce[i] ^ gamma[i + 32];
                 }
 
-                std::this_thread::sleep_for(std::chrono::duration < double, std::milli>(1000));
+                // Sign the message
+                uint8_t digest[32] = { 0 };
+                uint8_t signature[64] = { 0 };
+                KangarooTwelve(
+                    (unsigned char*)&packet + sizeof(RequestResponseHeader),
+                    sizeof(packet) - sizeof(RequestResponseHeader) - 64,
+                    digest,
+                    32);
+                sign(signingSubseed, signingPublicKey, digest, signature);
+                memcpy(packet.signature, signature, 64);
 
-                unsigned long long delta = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - timestamp).count();
-                if (delta >= 1000)
-                {
-                    // Get current time in UTC
-                    std::time_t now_time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-                    std::tm* utc_time = std::gmtime(&now_time);
-                    printf("|   %04d-%02d-%02d %02d:%02d:%02d   |   %llu it/s   |   %d solutions   |   %.10s...   |\n",
-                        utc_time->tm_year + 1900, utc_time->tm_mon, utc_time->tm_mday, utc_time->tm_hour, utc_time->tm_min, utc_time->tm_sec,
-                        (numberOfMiningIterations - prevNumberOfMiningIterations) * 1000 / delta, numberOfFoundSolutions.load(), miningID);
-                    prevNumberOfMiningIterations = numberOfMiningIterations;
-                    timestamp = std::chrono::steady_clock::now();
-                }
-            }
-        }
-        printf("Shutting down...Press Ctrl+C again to force stop.\n");
-
-        // Wait for all threads to join
-        for (auto& miningTh : miningThreads)
-        {
-            if (miningTh.joinable())
-            {
-                miningTh.join();
+                // Send message
+                serverSocket.sendData((char*)&packet, packet.header.size());
+                serverSocket.closeConnection();
             }
         }
         printf("Qiner is shut down.\n");
