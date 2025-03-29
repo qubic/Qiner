@@ -334,26 +334,101 @@ static void hexToByte(const char* hex, uint8_t* byte, const int sizeInByte)
     }
 }
 
+constexpr int MESSAGE_TYPE_CUSTOM_MINING_SOLUTION = 2;
+constexpr int BROADCAST_COMPUTORS = 2;
+constexpr int NUMBER_OF_COMPUTORS = 676;
+constexpr int SIGNATURE_SIZE = 64;
+
+class CustomSolution
+{
+public:
+
+    unsigned long long _taskIndex;
+    unsigned int nonce;         // xmrig::JobResult.nonce
+    unsigned char result[32];   // xmrig::JobResult.result
+};
+
+class CustomMiningSolutionMessage
+{
+
+public:
+    CustomMiningSolutionMessage() = default;
+
+    RequestResponseHeader _header;
+
+    unsigned char _sourcePublicKey[32];
+    unsigned char _destinationPublicKey[32];
+    unsigned char _gammingNonce[32];
+    CustomSolution _solution;
+
+    unsigned char _signature[64];
+
+    size_t serialize(char* buffer) const
+    {
+        memcpy(buffer, this, getTotalSizeInBytes());
+        return getTotalSizeInBytes();
+    }
+
+    size_t getTotalSizeInBytes() const
+    {
+        return sizeof(CustomMiningSolutionMessage);
+    }
+    size_t getPayLoadSize() const
+    {
+        return sizeof(CustomMiningSolutionMessage) - sizeof(_header) - sizeof(_signature);
+    }
+};
+
+typedef struct
+{
+    // TODO: Padding
+    unsigned short epoch;
+    unsigned char publicKeys[NUMBER_OF_COMPUTORS][32];
+    unsigned char signature[SIGNATURE_SIZE];
+} Computors;
+
+struct BroadcastComputors
+{
+    Computors computors;
+
+    static constexpr unsigned char type()
+    {
+        return BROADCAST_COMPUTORS;
+    }
+};
+
+
 int main(int argc, char* argv[])
 {
     std::vector<std::thread> miningThreads;
-    if (argc != 7)
+    if (argc < 5)
     {
-        printf("Usage:   Qiner [Node IP] [Node Port] [MiningID] [Signing Seed] [Mining Seed] [Nonces]\n");
+        printf("Usage:   Qiner [Node IP] [Node Port] [Seed] [Computors File]  \n");
     }
     else
     {
         nodeIp = argv[1];
         nodePort = std::atoi(argv[2]);
         char* miningID = argv[3];
+        char* compFileName = argv[4];
+
+        BroadcastComputors bc;
+        {
+            FILE* f = fopen(compFileName, "rb");
+            if (fread(&bc, 1, sizeof(BroadcastComputors), f) != sizeof(BroadcastComputors))
+            {
+                printf("Failed to read comp list\n");
+                fclose(f);
+                return 1;
+            }
+            fclose(f);
+        }
 
         consoleCtrlHandler();
 
         {
-            getPublicKeyFromIdentity(miningID, computorPublicKey);
-
             // Data for signing the solution
-            char* signingSeed = argv[4];
+            char* signingSeed = argv[3];
             unsigned char signingPrivateKey[32];
             unsigned char signingSubseed[32];
             unsigned char signingPublicKey[32];
@@ -363,73 +438,86 @@ int main(int argc, char* argv[])
             getSubseedFromSeed((unsigned char*)signingSeed, signingSubseed);
             getPrivateKeyFromSubSeed(signingSubseed, signingPrivateKey);
             getPublicKeyFromPrivateKey(signingPrivateKey, signingPublicKey);
+            getIdentityFromPublicKey(computorPublicKey, publicIdentity, false);
 
-            unsigned char nonce[32];
-            hexToByte(argv[5], randomSeed, 32);
-            hexToByte(argv[6], nonce, 32);
-
-            struct
+            // Look for computorIdx
+            int computorIdx = -1;
+            // Find the computor index
+            for (int k = 0; k < NUMBER_OF_COMPUTORS; k++)
             {
-                RequestResponseHeader header;
-                Message message;
-                unsigned char solutionMiningSeed[32];
-                unsigned char solutionNonce[32];
-                unsigned char signature[64];
-            } packet;
+                if (memcmp(signingPublicKey, bc.computors.publicKeys[k], 32) == 0)
+                {
+                    computorIdx = k;
+                }
+            }
+            if (computorIdx < 0)
+            {
+                printf("Can not find the computor index! PubID: %s\n", publicIdentity);
+                return 1;
+            }
+            else
+            {
+                printf("Detect computor index %d\n", computorIdx);
+            }
 
-            packet.header.setSize(sizeof(packet));
-            packet.header.zeroDejavu();
-            packet.header.setType(BROADCAST_MESSAGE);
+            CustomSolution solution;
 
-            memcpy(packet.message.sourcePublicKey, signingPublicKey, sizeof(packet.message.sourcePublicKey));
-            memcpy(packet.message.destinationPublicKey, computorPublicKey, sizeof(packet.message.destinationPublicKey));
+            // Adjust the nonce with computor index
+            _rdrand32_step(&solution.nonce);
+            solution.nonce = solution.nonce % 1024;
+            solution.nonce = solution.nonce * 676 + computorIdx;
+
+            CustomMiningSolutionMessage solutionMessage;
+
+            // Header
+            solutionMessage._header.setSize(solutionMessage.getTotalSizeInBytes());
+            solutionMessage._header.zeroDejavu();
+            solutionMessage._header.setType(BROADCAST_MESSAGE);
+
+            memcpy(solutionMessage._sourcePublicKey, signingPublicKey, sizeof(solutionMessage._sourcePublicKey));
+
+            // Zero destination is used for custom mining
+            memset(solutionMessage._destinationPublicKey, 0, sizeof(solutionMessage._destinationPublicKey));
+
+            // Payload
+            memcpy(&solutionMessage._solution, &solution, sizeof(solutionMessage._solution));
 
             unsigned char sharedKeyAndGammingNonce[64];
             // Default behavior when provided seed is just a signing address
             // first 32 bytes of sharedKeyAndGammingNonce is set as zeros
             memset(sharedKeyAndGammingNonce, 0, 32);
-            // If provided seed is the for computor public key, generate sharedKey into first 32 bytes to encrypt message
-            if (memcmp(computorPublicKey, signingPublicKey, 32) == 0)
-            {
-                getSharedKey(signingPrivateKey, computorPublicKey, sharedKeyAndGammingNonce);
-            }
+
             // Last 32 bytes of sharedKeyAndGammingNonce is randomly created so that gammingKey[0] = 0 (MESSAGE_TYPE_SOLUTION)
             unsigned char gammingKey[32];
             do
             {
-                _rdrand64_step((unsigned long long*) & packet.message.gammingNonce[0]);
-                _rdrand64_step((unsigned long long*) & packet.message.gammingNonce[8]);
-                _rdrand64_step((unsigned long long*) & packet.message.gammingNonce[16]);
-                _rdrand64_step((unsigned long long*) & packet.message.gammingNonce[24]);
-                memcpy(&sharedKeyAndGammingNonce[32], packet.message.gammingNonce, 32);
-                KangarooTwelve(sharedKeyAndGammingNonce, 64, gammingKey, 32);
-            } while (gammingKey[0]);
+                _rdrand64_step((unsigned long long*) & solutionMessage._gammingNonce[0]);
+                _rdrand64_step((unsigned long long*) & solutionMessage._gammingNonce[8]);
+                _rdrand64_step((unsigned long long*) & solutionMessage._gammingNonce[16]);
+                _rdrand64_step((unsigned long long*) & solutionMessage._gammingNonce[24]);
 
-            unsigned char gamma[32 + 32];
-            KangarooTwelve(gammingKey, sizeof(gammingKey), gamma, sizeof(gamma));
-            for (unsigned int i = 0; i < 32; i++)
-            {
-                packet.solutionMiningSeed[i] = randomSeed[i] ^ gamma[i];
-                packet.solutionNonce[i] = nonce[i] ^ gamma[i + 32];
-            }
+                memcpy(&sharedKeyAndGammingNonce[32], solutionMessage._gammingNonce, 32);
+                KangarooTwelve(sharedKeyAndGammingNonce, 64, gammingKey, 32);
+            } while (gammingKey[0] != MESSAGE_TYPE_CUSTOM_MINING_SOLUTION);
 
             // Sign the message
             uint8_t digest[32] = {0};
             uint8_t signature[64] = {0};
             KangarooTwelve(
-                (unsigned char*)&packet + sizeof(RequestResponseHeader),
-                sizeof(packet) - sizeof(RequestResponseHeader) - 64,
+                (unsigned char*)&solutionMessage + sizeof(RequestResponseHeader),
+                solutionMessage.getTotalSizeInBytes() - sizeof(RequestResponseHeader) - 64,
                 digest,
                 32);
             sign(signingSubseed, signingPublicKey, digest, signature);
-            memcpy(packet.signature, signature, 64);
+            memcpy(solutionMessage._signature, signature, 64);
+
 
             // Send data
             ServerSocket serverSocket;
             if (serverSocket.establishConnection(nodeIp))
             {
                 // Send message
-                if (!serverSocket.sendData((char*)&packet, packet.header.size()))
+                if (!serverSocket.sendData((char*)&solutionMessage, solutionMessage._header.size()))
                 {
                     printf("Failed to send data.\n");
                 }
