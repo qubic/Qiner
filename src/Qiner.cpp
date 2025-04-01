@@ -345,6 +345,7 @@ public:
 
     unsigned long long _taskIndex;
     unsigned int nonce;         // xmrig::JobResult.nonce
+    unsigned int padding;
     unsigned char result[32];   // xmrig::JobResult.result
 };
 
