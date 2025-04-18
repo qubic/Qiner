@@ -23,7 +23,7 @@
 
 #include "K12AndKeyUtil.h"
 #include "keyUtils.h"
-
+#include <iostream>
 
 void random(unsigned char* publicKey, unsigned char* nonce, unsigned char* output, unsigned int outputSize)
 {
@@ -463,9 +463,14 @@ int main(int argc, char* argv[])
 
             CustomSolution solution;
 
+            auto now = std::chrono::system_clock::now();
+            auto duration = now.time_since_epoch();
+            auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+            solution._taskIndex = milliseconds;
+
             // Adjust the nonce with computor index
             _rdrand32_step(&solution.nonce);
-            solution.nonce = solution.nonce % 1024;
+            solution.nonce = solution.nonce % (1 << 22);
             solution.nonce = solution.nonce * 676 + computorIdx;
 
             CustomMiningSolutionMessage solutionMessage;
