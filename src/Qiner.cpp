@@ -23,7 +23,10 @@
 
 #include "K12AndKeyUtil.h"
 #include "keyUtils.h"
+#include "connection.h"
 #include <iostream>
+#include <random>
+#include <algorithm>
 
 void random(unsigned char* publicKey, unsigned char* nonce, unsigned char* output, unsigned int outputSize)
 {
@@ -69,67 +72,6 @@ void random2(unsigned char* publicKey, unsigned char* nonce, unsigned char* outp
         x = x * 1664525 + 1013904223; // https://en.wikipedia.org/wiki/Linear_congruential_generator#Parameters_in_common_use
     }
 }
-
-struct RequestResponseHeader
-{
-private:
-    unsigned char _size[3];
-    unsigned char _type;
-    unsigned int _dejavu;
-
-public:
-    inline unsigned int size()
-    {
-        return (*((unsigned int*)_size)) & 0xFFFFFF;
-    }
-
-    inline void setSize(unsigned int size)
-    {
-        _size[0] = (unsigned char)size;
-        _size[1] = (unsigned char)(size >> 8);
-        _size[2] = (unsigned char)(size >> 16);
-    }
-
-    inline bool isDejavuZero() const
-    {
-        return !_dejavu;
-    }
-
-    inline void zeroDejavu()
-    {
-        _dejavu = 0;
-    }
-
-
-    inline unsigned int dejavu() const
-    {
-        return _dejavu;
-    }
-
-    inline void setDejavu(unsigned int dejavu)
-    {
-        _dejavu = dejavu;
-    }
-
-    inline void randomizeDejavu()
-    {
-        _rdrand32_step(&_dejavu);
-        if (!_dejavu)
-        {
-            _dejavu = 1;
-        }
-    }
-
-    inline unsigned char type() const
-    {
-        return _type;
-    }
-
-    inline void setType(const unsigned char type)
-    {
-        _type = type;
-    }
-};
 
 #define BROADCAST_MESSAGE 1
 
@@ -327,25 +269,70 @@ struct ServerSocket
     }
 };
 
-static void hexToByte(const char* hex, uint8_t* byte, const int sizeInByte)
-{
-    for (int i = 0; i < sizeInByte; i++){
-        sscanf(hex+i*2, "%2hhx", &byte[i]);
-    }
-}
 
+constexpr int MESSAGE_TYPE_CUSTOM_MINING_TASK = 1;
 constexpr int MESSAGE_TYPE_CUSTOM_MINING_SOLUTION = 2;
-constexpr int BROADCAST_COMPUTORS = 2;
-constexpr int NUMBER_OF_COMPUTORS = 676;
-constexpr int SIGNATURE_SIZE = 64;
+
+constexpr uint16_t NUMBER_OF_TASK_PARTITIONS = 4;
+struct
+{
+    uint16_t firstComputorIdx;
+    uint16_t lastComputorIdx;
+    uint32_t domainSize;
+} gTaskPartition[NUMBER_OF_TASK_PARTITIONS];
+uint16_t gComputorPartitionMap[676];
+
+struct CustomMiningTask
+{
+    unsigned long long taskIndex; // ever increasing number (unix timestamp in ms)
+    unsigned short firstComputorIndex, lastComputorIndex;
+    unsigned int padding;
+
+    unsigned char blob[408]; // Job data from pool
+    unsigned long long size;  // length of the blob
+    unsigned long long target; // Pool difficulty
+    unsigned long long height; // Block height
+    unsigned char seed[32]; // Seed hash for XMR
+};
+
+class CustomMiningTaskMessage
+{
+
+public:
+CustomMiningTaskMessage() = default;
+
+    RequestResponseHeader _header;
+
+    unsigned char _sourcePublicKey[32];
+    unsigned char _destinationPublicKey[32];
+    unsigned char _gammingNonce[32];
+    CustomMiningTask _task;
+
+    unsigned char _signature[64];
+
+    size_t serialize(char* buffer) const
+    {
+        memcpy(buffer, this, getTotalSizeInBytes());
+        return getTotalSizeInBytes();
+    }
+
+    size_t getTotalSizeInBytes() const
+    {
+        return sizeof(CustomMiningTaskMessage);
+    }
+    size_t getPayLoadSize() const
+    {
+        return sizeof(CustomMiningTaskMessage) - sizeof(_header) - sizeof(_signature);
+    }
+};
 
 class CustomSolution
 {
 public:
 
     unsigned long long _taskIndex;
+    unsigned short firstComputorIndex, lastComputorIndex;
     unsigned int nonce;         // xmrig::JobResult.nonce
-    unsigned int padding;
     unsigned char result[32];   // xmrig::JobResult.result
 };
 
@@ -380,160 +367,429 @@ public:
     }
 };
 
-typedef struct
+int craftTaskMessage(
+    const unsigned char* signingSubseed,
+    const unsigned char* signingPublicKey,
+    uint32_t partID,
+    CustomMiningTaskMessage& taskMessage)
 {
-    // TODO: Padding
-    unsigned short epoch;
-    unsigned char publicKeys[NUMBER_OF_COMPUTORS][32];
-    unsigned char signature[SIGNATURE_SIZE];
-} Computors;
+    // Header
+    taskMessage._header.setSize(taskMessage.getTotalSizeInBytes());
+    taskMessage._header.zeroDejavu();
+    taskMessage._header.setType(BROADCAST_MESSAGE);
 
-struct BroadcastComputors
+    memcpy(taskMessage._sourcePublicKey, signingPublicKey, sizeof(taskMessage._sourcePublicKey));
+
+    // Zero destination is used for custom mining
+    memset(taskMessage._destinationPublicKey, 0, sizeof(taskMessage._destinationPublicKey));
+
+    // Payload of a dummy task
+    auto now = std::chrono::system_clock::now();
+    auto duration = now.time_since_epoch();
+    auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+    taskMessage._task.taskIndex = (uint64_t)milliseconds;
+    taskMessage._task.size = 76;
+    taskMessage._task.target = 38427114278264;
+    taskMessage._task.height = 3401164;
+
+    // Random the first and last computor index
+    taskMessage._task.firstComputorIndex = gTaskPartition[partID].firstComputorIdx;
+    taskMessage._task.lastComputorIndex = gTaskPartition[partID].lastComputorIdx;
+
+    // Gamming nonce
+    unsigned char sharedKeyAndGammingNonce[64];
+    // Default behavior when provided seed is just a signing address
+    // first 32 bytes of sharedKeyAndGammingNonce is set as zeros
+    memset(sharedKeyAndGammingNonce, 0, 32);
+
+    // Last 32 bytes of sharedKeyAndGammingNonce is randomly created so that gammingKey[0] = 0 (MESSAGE_TYPE_CUSTOM_MINING_TASK)
+    unsigned char gammingKey[32];
+    do
+    {
+        _rdrand64_step((unsigned long long*) & taskMessage._gammingNonce[0]);
+        _rdrand64_step((unsigned long long*) & taskMessage._gammingNonce[8]);
+        _rdrand64_step((unsigned long long*) & taskMessage._gammingNonce[16]);
+        _rdrand64_step((unsigned long long*) & taskMessage._gammingNonce[24]);
+
+        memcpy(&sharedKeyAndGammingNonce[32], taskMessage._gammingNonce, 32);
+        KangarooTwelve(sharedKeyAndGammingNonce, 64, gammingKey, 32);
+    } while (gammingKey[0] != MESSAGE_TYPE_CUSTOM_MINING_TASK);
+
+
+    // Sign the message
+    uint8_t digest[32] = {0};
+    uint8_t signature[64] = {0};
+    KangarooTwelve(
+        (unsigned char*)&taskMessage + sizeof(RequestResponseHeader),
+        taskMessage.getTotalSizeInBytes() - sizeof(RequestResponseHeader) - SIGNATURE_SIZE,
+        digest,
+        32);
+    sign(signingSubseed, signingPublicKey, digest, signature);
+    memcpy(taskMessage._signature, signature, 64);
+
+    return 0;
+}
+
+int craftSolutionMessage(
+    const unsigned char* signingSubseed,
+    const unsigned char* signingPublicKey,
+    const CustomMiningTask& task,
+    const unsigned long long nonce,
+    CustomMiningSolutionMessage& solMessage)
 {
-    Computors computors;
+    // Header
+    solMessage._header.setSize(solMessage.getTotalSizeInBytes());
+    solMessage._header.zeroDejavu();
+    solMessage._header.setType(BROADCAST_MESSAGE);
 
-    static constexpr unsigned char type()
+    memcpy(solMessage._sourcePublicKey, signingPublicKey, sizeof(solMessage._sourcePublicKey));
+
+    // Zero destination is used for custom mining
+    memset(solMessage._destinationPublicKey, 0, sizeof(solMessage._destinationPublicKey));
+
+    // Payload of a dummy solution
+    solMessage._solution._taskIndex = task.taskIndex;
+    solMessage._solution.firstComputorIndex = task.firstComputorIndex;
+    solMessage._solution.lastComputorIndex = task.lastComputorIndex;
+    solMessage._solution.nonce = nonce;
+
+    // Gamming nonce
+    unsigned char sharedKeyAndGammingNonce[64];
+    // Default behavior when provided seed is just a signing address
+    // first 32 bytes of sharedKeyAndGammingNonce is set as zeros
+    memset(sharedKeyAndGammingNonce, 0, 32);
+
+    // Last 32 bytes of sharedKeyAndGammingNonce is randomly created so that gammingKey[0] = 0 (MESSAGE_TYPE_CUSTOM_MINING_TASK)
+    unsigned char gammingKey[32];
+    do
     {
-        return BROADCAST_COMPUTORS;
-    }
-};
+        _rdrand64_step((unsigned long long*) & solMessage._gammingNonce[0]);
+        _rdrand64_step((unsigned long long*) & solMessage._gammingNonce[8]);
+        _rdrand64_step((unsigned long long*) & solMessage._gammingNonce[16]);
+        _rdrand64_step((unsigned long long*) & solMessage._gammingNonce[24]);
+
+        memcpy(&sharedKeyAndGammingNonce[32], solMessage._gammingNonce, 32);
+        KangarooTwelve(sharedKeyAndGammingNonce, 64, gammingKey, 32);
+    } while (gammingKey[0] != MESSAGE_TYPE_CUSTOM_MINING_SOLUTION);
 
 
-int main(int argc, char* argv[])
+    // Sign the message
+    uint8_t digest[32] = {0};
+    uint8_t signature[64] = {0};
+    KangarooTwelve(
+        (unsigned char*)&solMessage + sizeof(RequestResponseHeader),
+        solMessage.getTotalSizeInBytes() - sizeof(RequestResponseHeader) - SIGNATURE_SIZE,
+        digest,
+        32);
+    sign(signingSubseed, signingPublicKey, digest, signature);
+    memcpy(solMessage._signature, signature, 64);
+
+    return 0;
+}
+
+int randomPartId[] = {0, 1, 2, 3};
+
+void runDispatcher(char* ip, int port, char* signingSeed)
 {
-    std::vector<std::thread> miningThreads;
-    if (argc < 5)
-    {
-        printf("Usage:   Qiner [Node IP] [Node Port] [Seed] [Computors File]  \n");
-    }
-    else
-    {
-        nodeIp = argv[1];
-        nodePort = std::atoi(argv[2]);
-        char* miningID = argv[3];
-        char* compFileName = argv[4];
+    // Set up a random number generator
+    std::random_device rd;
+    std::mt19937 g(rd());
 
-        BroadcastComputors bc;
+    unsigned char signingPrivateKey[32];
+    unsigned char signingSubseed[32];
+    unsigned char signingPublicKey[32];
+    char privateKeyQubicFormat[128] = {0};
+    char publicKeyQubicFormat[128] = {0};
+    char publicIdentity[128] = {0};
+    getSubseedFromSeed((unsigned char*)signingSeed, signingSubseed);
+    getPrivateKeyFromSubSeed(signingSubseed, signingPrivateKey);
+    getPublicKeyFromPrivateKey(signingPrivateKey, signingPublicKey);
+    getIdentityFromPublicKey(signingPublicKey, publicIdentity, false);
+
+    printf("Start DISPATCHER ID %s \n", publicIdentity);
+
+    CustomMiningTaskMessage taskMessage;
+    while (0 == state.load())
+    {
+        // Spawn part ID
+        // Shuffle the array
+        std::shuffle(std::begin(randomPartId), std::end(randomPartId), g);
+
+        for (int i = 0; i < NUMBER_OF_TASK_PARTITIONS; i++)
         {
-            FILE* f = fopen(compFileName, "rb");
-            if (fread(&bc, 1, sizeof(BroadcastComputors), f) != sizeof(BroadcastComputors))
-            {
-                printf("Failed to read comp list\n");
-                fclose(f);
-                return 1;
-            }
-            fclose(f);
-        }
+            craftTaskMessage(signingSubseed, signingPublicKey, randomPartId[i], taskMessage);
 
-        consoleCtrlHandler();
-
-        {
-            // Data for signing the solution
-            char* signingSeed = argv[3];
-            unsigned char signingPrivateKey[32];
-            unsigned char signingSubseed[32];
-            unsigned char signingPublicKey[32];
-            char privateKeyQubicFormat[128] = {0};
-            char publicKeyQubicFormat[128] = {0};
-            char publicIdentity[128] = {0};
-            getSubseedFromSeed((unsigned char*)signingSeed, signingSubseed);
-            getPrivateKeyFromSubSeed(signingSubseed, signingPrivateKey);
-            getPublicKeyFromPrivateKey(signingPrivateKey, signingPublicKey);
-            getIdentityFromPublicKey(computorPublicKey, publicIdentity, false);
-
-            // Look for computorIdx
-            int computorIdx = -1;
-            // Find the computor index
-            for (int k = 0; k < NUMBER_OF_COMPUTORS; k++)
-            {
-                if (memcmp(signingPublicKey, bc.computors.publicKeys[k], 32) == 0)
-                {
-                    computorIdx = k;
-                }
-            }
-            if (computorIdx < 0)
-            {
-                printf("Can not find the computor index! PubID: %s\n", publicIdentity);
-                return 1;
-            }
-            else
-            {
-                printf("Detect computor index %d\n", computorIdx);
-            }
-
-            CustomSolution solution;
-
-            auto now = std::chrono::system_clock::now();
-            auto duration = now.time_since_epoch();
-            auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
-            solution._taskIndex = milliseconds;
-
-            // Adjust the nonce with computor index
-            _rdrand32_step(&solution.nonce);
-            solution.nonce = solution.nonce % (1 << 22);
-            solution.nonce = solution.nonce * 676 + computorIdx;
-
-            CustomMiningSolutionMessage solutionMessage;
-
-            // Header
-            solutionMessage._header.setSize(solutionMessage.getTotalSizeInBytes());
-            solutionMessage._header.zeroDejavu();
-            solutionMessage._header.setType(BROADCAST_MESSAGE);
-
-            memcpy(solutionMessage._sourcePublicKey, signingPublicKey, sizeof(solutionMessage._sourcePublicKey));
-
-            // Zero destination is used for custom mining
-            memset(solutionMessage._destinationPublicKey, 0, sizeof(solutionMessage._destinationPublicKey));
-
-            // Payload
-            memcpy(&solutionMessage._solution, &solution, sizeof(solutionMessage._solution));
-
-            unsigned char sharedKeyAndGammingNonce[64];
-            // Default behavior when provided seed is just a signing address
-            // first 32 bytes of sharedKeyAndGammingNonce is set as zeros
-            memset(sharedKeyAndGammingNonce, 0, 32);
-
-            // Last 32 bytes of sharedKeyAndGammingNonce is randomly created so that gammingKey[0] = 0 (MESSAGE_TYPE_SOLUTION)
-            unsigned char gammingKey[32];
-            do
-            {
-                _rdrand64_step((unsigned long long*) & solutionMessage._gammingNonce[0]);
-                _rdrand64_step((unsigned long long*) & solutionMessage._gammingNonce[8]);
-                _rdrand64_step((unsigned long long*) & solutionMessage._gammingNonce[16]);
-                _rdrand64_step((unsigned long long*) & solutionMessage._gammingNonce[24]);
-
-                memcpy(&sharedKeyAndGammingNonce[32], solutionMessage._gammingNonce, 32);
-                KangarooTwelve(sharedKeyAndGammingNonce, 64, gammingKey, 32);
-            } while (gammingKey[0] != MESSAGE_TYPE_CUSTOM_MINING_SOLUTION);
-
-            // Sign the message
-            uint8_t digest[32] = {0};
-            uint8_t signature[64] = {0};
-            KangarooTwelve(
-                (unsigned char*)&solutionMessage + sizeof(RequestResponseHeader),
-                solutionMessage.getTotalSizeInBytes() - sizeof(RequestResponseHeader) - 64,
-                digest,
-                32);
-            sign(signingSubseed, signingPublicKey, digest, signature);
-            memcpy(solutionMessage._signature, signature, 64);
-
-
-            // Send data
+            // Send the data
             ServerSocket serverSocket;
             if (serverSocket.establishConnection(nodeIp))
             {
                 // Send message
-                if (!serverSocket.sendData((char*)&solutionMessage, solutionMessage._header.size()))
+                if (!serverSocket.sendData((char*)&taskMessage, taskMessage._header.size()))
                 {
                     printf("Failed to send data.\n");
                 }
                 serverSocket.closeConnection();
+                printf("Sent task %llu, firstIdx %d, lastIdx %d \n", taskMessage._task.taskIndex, taskMessage._task.firstComputorIndex, taskMessage._task.lastComputorIndex);
             }
             else
             {
                 printf("Failed to establishConnection %s:%d.\n", nodeIp, nodePort);
             }
         }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(10000));
+    }
+}
+
+std::atomic<int> nPeer(0);
+CustomMiningTaskMessage currentTaskMessage;
+std::mutex taskLock;
+
+void listenerThread(const char* nodeIp, int port, unsigned char* dispatcherPublicKey)
+{
+    printf("Start listerner ID %s:%d \n", nodeIp, port);
+    long long prevTs = 0;
+    QCPtr qc;
+    bool needReconnect = true;
+    std::string log_header = "[" + std::string(nodeIp) + "]: ";
+    while (0 == state.load())
+    {
+        try {
+            if (needReconnect) {
+                needReconnect = false;
+                nPeer.fetch_add(1);
+                qc = make_qc(nodeIp, port);
+                qc->exchangePeer();// do the handshake stuff
+                // TODO: connect to received peers
+                printf("Connected to %s\n", nodeIp);
+            }
+            auto header = qc->receiveHeader();
+            std::vector<uint8_t> buff;
+            uint32_t sz = header.size();
+            if (sz > 0xFFFFFF)
+            {
+                needReconnect = true;
+                nPeer.fetch_add(-1);
+                continue;
+            }
+            sz -= sizeof(RequestResponseHeader);
+            buff.resize(sz);
+            qc->receiveData(buff.data(), sz);
+            if (header.type() == 1) // broadcast msg
+            {
+                if (buff.size() == sizeof(CustomMiningTaskMessage) - sizeof(RequestResponseHeader))
+                {
+                    CustomMiningTaskMessage tk;
+                    memcpy((char*)&tk + sizeof(RequestResponseHeader),buff.data(), buff.size());
+                    if (memcmp(dispatcherPublicKey, tk._sourcePublicKey, 32) != 0)
+                    {
+                        printf("Job not from dispatcher\n");
+                        continue;
+                    }
+                    uint8_t sharedKeyAndGammingNonce[64];
+                    memset(sharedKeyAndGammingNonce, 0, 32);
+                    memcpy(&sharedKeyAndGammingNonce[32], tk._gammingNonce, 32);
+                    uint8_t gammingKey[32];
+                    KangarooTwelve(sharedKeyAndGammingNonce, 64, gammingKey, 32);
+                    if (gammingKey[0] != 1)
+                    {
+                        printf("Wrong type from dispatcher\n");
+                        continue;
+                    }
+                    uint8_t digest[32];
+                    KangarooTwelve(buff.data(), buff.size() - 64, digest, 32);
+                    if (!verify(dispatcherPublicKey, digest, buff.data() + buff.size() - 64))
+                    {
+                        printf("Wrong sig from dispatcher\n");
+                        continue;
+                    }
+                    {
+                        std::lock_guard<std::mutex> glock(taskLock);
+                        if (currentTaskMessage._task.taskIndex <  tk._task.taskIndex)
+                        {
+                            currentTaskMessage = tk;
+                        }
+                        else
+                        {
+                            continue;
+                        }
+                    }
+                    uint64_t delta = 0;
+
+                    if (prevTs)
+                    {
+                        delta = (tk._task.taskIndex - prevTs);
+                    }
+                    prevTs = tk._task.taskIndex;
+                    char dbg[256] = {0};
+                    std::string debug_log = log_header;
+                    sprintf(dbg, "Received task index %lu (d_prev: %lu ms)", tk._task.taskIndex, delta);
+                    debug_log += std::string(dbg); memset(dbg, 0, sizeof(dbg));
+                    printf("%s\n", debug_log.c_str());
+                }
+
+            }
+            fflush(stdout);
+        }
+        catch (std::logic_error &ex) {
+            printf("%s\n", ex.what());
+            fflush(stdout);
+            needReconnect = true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10000));
+        }
+    }
+}
+
+void solutionThread(const char* nodeIp, int port, char* computorSeed, int noncePerTask, unsigned int constantNonce )
+{
+    unsigned char signingPrivateKey[32];
+    unsigned char signingSubseed[32];
+    unsigned char signingPublicKey[32];
+    char privateKeyQubicFormat[128] = {0};
+    char publicKeyQubicFormat[128] = {0};
+    char publicIdentity[128] = {0};
+    getSubseedFromSeed((unsigned char*)computorSeed, signingSubseed);
+    getPrivateKeyFromSubSeed(signingSubseed, signingPrivateKey);
+    getPublicKeyFromPrivateKey(signingPrivateKey, signingPublicKey);
+    getIdentityFromPublicKey(signingPublicKey, publicIdentity, false);
+
+    // Message send to node
+    CustomMiningSolutionMessage solMessage;
+    printf("Start solution thread ID %s:%d \n", nodeIp, port);
+    QCPtr qc;
+    bool needReconnect = true;
+    CustomMiningTaskMessage local_task;
+    local_task._task.taskIndex = 0;
+    while (0 == state.load())
+    {
+        bool hasNewTask = false;
+        {
+            std::lock_guard<std::mutex> glock(taskLock);
+            if (currentTaskMessage._task.taskIndex > local_task._task.taskIndex)
+            {
+                local_task = currentTaskMessage;
+                hasNewTask = true;
+            }
+        }
+        if (!hasNewTask)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+            continue;
+        }
+
+        // Generate a specific number of solution and submit to the node
+        int submittedCount = 0;
+
+        while (submittedCount < noncePerTask)
+        {
+            unsigned int nonce = 0;
+            if (constantNonce != 0xFFFFFFFF)
+            {
+                nonce = constantNonce;
+            }
+            else
+            {
+                _rdrand32_step((unsigned int*) &nonce);
+            }
+            craftSolutionMessage(signingSubseed, signingPublicKey, local_task._task, nonce, solMessage);
+
+            try {
+                if (needReconnect)
+                {
+                    needReconnect = false;
+                    qc = make_qc(nodeIp, port);
+                }
+                int dataSend = qc->sendData((uint8_t*)&solMessage, sizeof(solMessage));
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                submittedCount++;
+            }
+            catch (std::logic_error &ex)
+            {
+                printf("%s\n", ex.what());
+                fflush(stdout);
+                needReconnect = true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            }
+        }
+
+        printf("Submitted %d sols per task\n", noncePerTask);
+    }
+}
+
+void printHelp()
+{
+    std::cout << "Usage:\n";
+    std::cout << "- Dispatcher:      broadcastMessageSolution dispatch [Node IP] [Node Port] [Dispatcher Seed]\n";
+    std::cout << "- Submit solution: broadcastMessageSolution solution [Node IP] [Node Port] [Dispatcher ID] [Seed] [NoncePerTask] [DuplicatedSolutionNonce]\n";
+}
+
+int main(int argc, char* argv[])
+{
+    // Generate computor groups
+    for (int i = 0; i < NUMBER_OF_TASK_PARTITIONS; i++)
+    {
+        gTaskPartition[i].firstComputorIdx = i * NUMBER_OF_COMPUTORS / 4;
+        gTaskPartition[i].lastComputorIdx = gTaskPartition[i].firstComputorIdx + NUMBER_OF_COMPUTORS / 4 - 1;
+        gTaskPartition[i].domainSize =  0xFFFFFFFFU / (gTaskPartition[i].lastComputorIdx  - gTaskPartition[i].firstComputorIdx + 1);
+    }
+
+    std::vector<std::thread> miningThreads;
+    if (argc < 4)
+    {
+        printHelp();
+        return 0;
+    }
+
+    std::string mode = argv[1];
+    if (mode == "dispatch")
+    {
+        consoleCtrlHandler();
+        nodeIp = argv[2];
+        nodePort = std::atoi(argv[3]);
+        // Data for signing the solution
+        char* signingSeed = argv[4];
+        std::cout << "Dispatcher Mode:" << std::endl;
+        std::cout << "- IP:" << nodeIp << ":" << nodePort << std::endl;
+        std::cout << "- seed:" << signingSeed << std::endl;
+        runDispatcher(nodeIp, nodePort, signingSeed);
+    }
+    else if (mode == "solution")
+    {
+        nodeIp = argv[2];
+        nodePort = std::atoi(argv[3]);
+        char* dispatcherPubID = argv[4];
+        char* computorSeed = argv[5];
+        unsigned int noncePerTask = std::atoi(argv[6]);
+
+        unsigned int constantSolutionNonce = 0xFFFFFFFFUL;
+        if (argc == 8)
+        {
+            constantSolutionNonce = std::atoi(argv[7]);
+            printf("Enable submit duplicated solution! Nonce = %u\n", constantSolutionNonce);
+        }
+
+        uint8_t dispatcherPubkey[32];
+        getPublicKeyFromIdentity(dispatcherPubID, dispatcherPubkey);
+        std::vector<std::thread> thr;
+
+        // Fetch task from peers
+        thr.push_back(std::thread(listenerThread, nodeIp, nodePort, dispatcherPubkey));
+
+        // Submit the task to node
+        //const char* nodeIp, int port, unsigned char* computorSeed, unsigned int noncePerTask, unsigned int constantNonce
+        thr.push_back(std::thread(solutionThread, nodeIp, nodePort, computorSeed, noncePerTask, constantSolutionNonce));
+
+        for (auto& t : thr)
+        {
+            if (t.joinable())
+            {
+                t.join();
+            }
+        }
+    }
+    else
+    {
+        printHelp();
     }
 
     return 0;

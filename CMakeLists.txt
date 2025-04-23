@@ -19,7 +19,7 @@ else()
 endif()
 
 # Main executable
-add_executable(broadcastMessageSolution src/Qiner.cpp src/keyUtils.cpp)
+add_executable(broadcastMessageSolution src/Qiner.cpp src/keyUtils.cpp src/connection.cpp)
 
 include_directories(broadcastMessageSolution ./src)
 
