@@ -27,6 +27,7 @@
 #include <iostream>
 #include <random>
 #include <algorithm>
+#include <csignal>
 
 void random(unsigned char* publicKey, unsigned char* nonce, unsigned char* output, unsigned int outputSize)
 {
@@ -574,8 +575,8 @@ void listenerThread(const char* nodeIp, int port, unsigned char* dispatcherPubli
             }
             sz -= sizeof(RequestResponseHeader);
             buff.resize(sz);
-            qc->receiveData(buff.data(), sz);
-            if (header.type() == 1) // broadcast msg
+            int revSize = qc->receiveData(buff.data(), sz);
+            if (revSize == sz && header.type() == 1) // broadcast msg
             {
                 if (buff.size() == sizeof(CustomMiningTaskMessage) - sizeof(RequestResponseHeader))
                 {
@@ -636,6 +637,13 @@ void listenerThread(const char* nodeIp, int port, unsigned char* dispatcherPubli
             fflush(stdout);
             needReconnect = true;
             std::this_thread::sleep_for(std::chrono::milliseconds(10000));
+        }
+        catch (...)
+        {
+            printf("Unknown exception caught!\n");
+            fflush(stdout);
+            needReconnect = true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
         }
     }
 }
@@ -700,12 +708,26 @@ void solutionThread(const char* nodeIp, int port, char* computorSeed, int nonceP
                     qc = make_qc(nodeIp, port);
                 }
                 int dataSend = qc->sendData((uint8_t*)&solMessage, sizeof(solMessage));
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                submittedCount++;
+                if (dataSend == sizeof(solMessage))
+                {
+                    submittedCount++;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+                else
+                {
+                    needReconnect = true;
+                }
             }
             catch (std::logic_error &ex)
             {
-                printf("%s\n", ex.what());
+                printf("Connection FAILED %s\n", ex.what());
+                fflush(stdout);
+                needReconnect = true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            }
+            catch (...)
+            {
+                printf("Unknown exception caught!\n");
                 fflush(stdout);
                 needReconnect = true;
                 std::this_thread::sleep_for(std::chrono::milliseconds(1000));
@@ -725,6 +747,9 @@ void printHelp()
 
 int main(int argc, char* argv[])
 {
+    // Ignore SIGPIPE globally
+    std::signal(SIGPIPE, SIG_IGN);
+
     // Generate computor groups
     for (int i = 0; i < NUMBER_OF_TASK_PARTITIONS; i++)
     {
