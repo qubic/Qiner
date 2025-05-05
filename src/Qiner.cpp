@@ -28,6 +28,7 @@
 #include <random>
 #include <algorithm>
 #include <csignal>
+#include <sstream>
 
 void random(unsigned char* publicKey, unsigned char* nonce, unsigned char* output, unsigned int outputSize)
 {
@@ -488,9 +489,13 @@ int craftSolutionMessage(
     return 0;
 }
 
-int randomPartId[] = {0, 1, 2, 3};
+std::queue<CustomMiningTask> taskVectors[676];
+std::queue<CustomMiningSolutionMessage> solsQueue;
+std::mutex taskLockVectors[676];
+std::mutex solLock;
 
-void runDispatcher(char* ip, int port, char* signingSeed)
+int randomPartId[] = {0, 1, 2, 3};
+void runDispatcher(char* ip, int port, char* signingSeed, int numberOfComputors)
 {
     // Set up a random number generator
     std::random_device rd;
@@ -535,6 +540,12 @@ void runDispatcher(char* ip, int port, char* signingSeed)
             else
             {
                 printf("Failed to establishConnection %s:%d.\n", nodeIp, nodePort);
+            }
+
+            for (int k = 0; k < numberOfComputors; k++)
+            {
+                std::lock_guard<std::mutex> lock(taskLockVectors[k]);
+                taskVectors[k].push(taskMessage._task);
             }
         }
 
@@ -648,7 +659,7 @@ void listenerThread(const char* nodeIp, int port, unsigned char* dispatcherPubli
     }
 }
 
-void solutionThread(const char* nodeIp, int port, char* computorSeed, int noncePerTask, unsigned int constantNonce )
+void solutionThread(const char* computorSeed, int noncePerTask, unsigned int constantNonce, int compIdx)
 {
     unsigned char signingPrivateKey[32];
     unsigned char signingSubseed[32];
@@ -663,22 +674,22 @@ void solutionThread(const char* nodeIp, int port, char* computorSeed, int nonceP
 
     // Message send to node
     CustomMiningSolutionMessage solMessage;
-    printf("Start solution thread ID %s:%d \n", nodeIp, port);
-    QCPtr qc;
-    bool needReconnect = true;
-    CustomMiningTaskMessage local_task;
-    local_task._task.taskIndex = 0;
+    printf("Start solution thread for %s \n", publicIdentity);
+    CustomMiningTask local_task;
+    local_task.taskIndex = 0;
     while (0 == state.load())
     {
         bool hasNewTask = false;
         {
-            std::lock_guard<std::mutex> glock(taskLock);
-            if (currentTaskMessage._task.taskIndex > local_task._task.taskIndex)
+            std::lock_guard<std::mutex> glock(taskLockVectors[compIdx]);
+            hasNewTask = !taskVectors[compIdx].empty();
+            if (hasNewTask)
             {
-                local_task = currentTaskMessage;
-                hasNewTask = true;
+                local_task = taskVectors[compIdx].front();
+                taskVectors[compIdx].pop();
             }
         }
+
         if (!hasNewTask)
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(5000));
@@ -687,7 +698,6 @@ void solutionThread(const char* nodeIp, int port, char* computorSeed, int nonceP
 
         // Generate a specific number of solution and submit to the node
         int submittedCount = 0;
-
         while (submittedCount < noncePerTask)
         {
             unsigned int nonce = 0;
@@ -699,50 +709,89 @@ void solutionThread(const char* nodeIp, int port, char* computorSeed, int nonceP
             {
                 _rdrand32_step((unsigned int*) &nonce);
             }
-            craftSolutionMessage(signingSubseed, signingPublicKey, local_task._task, nonce, solMessage);
+            craftSolutionMessage(signingSubseed, signingPublicKey, local_task, nonce, solMessage);
+            {
+                std::lock_guard<std::mutex> lock(solLock);
+                solsQueue.push(solMessage);
+            }
+            submittedCount++;
+        }
+    }
+}
 
-            try {
-                if (needReconnect)
+void submitionThread(const char* nodeIp, int port)
+{
+    QCPtr qc;
+    bool needReconnect = true;
+    CustomMiningSolutionMessage solMessage;
+    while (0 == state.load())
+    {
+        try {
+            if (needReconnect)
+            {
+                needReconnect = false;
+                qc = make_qc(nodeIp, port);
+            }
+            bool hasSols = false;
+            {
+                std::lock_guard<std::mutex> lock(solLock);
+                hasSols = !solsQueue.empty();
+                if (hasSols)
                 {
-                    needReconnect = false;
-                    qc = make_qc(nodeIp, port);
-                }
-                int dataSend = qc->sendData((uint8_t*)&solMessage, sizeof(solMessage));
-                if (dataSend == sizeof(solMessage))
-                {
-                    submittedCount++;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                }
-                else
-                {
-                    needReconnect = true;
+                    solMessage = solsQueue.front();
+                    solsQueue.pop();
                 }
             }
-            catch (std::logic_error &ex)
+
+            if (!hasSols)
             {
-                printf("Connection FAILED %s\n", ex.what());
-                fflush(stdout);
-                needReconnect = true;
-                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+                continue;
             }
-            catch (...)
+
+            int dataSend = qc->sendData((uint8_t*)&solMessage, sizeof(solMessage));
+            if (dataSend == sizeof(solMessage))
             {
-                printf("Unknown exception caught!\n");
-                fflush(stdout);
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            else
+            {
                 needReconnect = true;
-                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
             }
         }
-
-        printf("Submitted %d sols per task\n", noncePerTask);
+        catch (std::logic_error &ex)
+        {
+            printf("Connection FAILED %s\n", ex.what());
+            fflush(stdout);
+            needReconnect = true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        }
+        catch (...)
+        {
+            printf("Unknown exception caught!\n");
+            fflush(stdout);
+            needReconnect = true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        }
     }
 }
 
 void printHelp()
 {
     std::cout << "Usage:\n";
-    std::cout << "- Dispatcher:      broadcastMessageSolution dispatch [Node IP] [Node Port] [Dispatcher Seed]\n";
-    std::cout << "- Submit solution: broadcastMessageSolution solution [Node IP] [Node Port] [Dispatcher ID] [Seed] [NoncePerTask] [DuplicatedSolutionNonce]\n";
+    std::cout << "- Submit solution: broadcastMessageSolution [Node IP] [Node Port] [Dispatcher ID] [Seed0,Seed1,seed2...] [NoncePerTask] [DuplicatedSolutionNonce]\n";
+}
+
+std::vector<std::string> getListOfComputorSeeds(std::string input)
+{
+    std::vector<std::string> result;
+    std::stringstream ss(input);
+    std::string str;
+    while (std::getline(ss, str, ','))
+    {
+        result.push_back(str);
+    }
+    return result;
 }
 
 int main(int argc, char* argv[])
@@ -765,44 +814,49 @@ int main(int argc, char* argv[])
         return 0;
     }
 
-    std::string mode = argv[1];
-    if (mode == "dispatch")
+    //std::string mode = argv[1];
+    //if (mode == "dispatch")
     {
         consoleCtrlHandler();
-        nodeIp = argv[2];
-        nodePort = std::atoi(argv[3]);
-        // Data for signing the solution
-        char* signingSeed = argv[4];
-        std::cout << "Dispatcher Mode:" << std::endl;
-        std::cout << "- IP:" << nodeIp << ":" << nodePort << std::endl;
-        std::cout << "- seed:" << signingSeed << std::endl;
-        runDispatcher(nodeIp, nodePort, signingSeed);
-    }
-    else if (mode == "solution")
-    {
-        nodeIp = argv[2];
-        nodePort = std::atoi(argv[3]);
-        char* dispatcherPubID = argv[4];
-        char* computorSeed = argv[5];
-        unsigned int noncePerTask = std::atoi(argv[6]);
+        nodeIp = argv[1];
+        nodePort = std::atoi(argv[2]);
 
+        // Data for signing the solution
+        char* signingSeed = argv[3];
+        std::string listSeed = argv[4];
+        std::vector<std::string> computorsSeed = getListOfComputorSeeds(listSeed);
+        std::cout << argv[4];
+        unsigned int noncePerTask = std::atoi(argv[5]);
         unsigned int constantSolutionNonce = 0xFFFFFFFFUL;
-        if (argc == 8)
+        if (argc == 7)
         {
-            constantSolutionNonce = std::atoi(argv[7]);
+            constantSolutionNonce = std::atoi(argv[6]);
             printf("Enable submit duplicated solution! Nonce = %u\n", constantSolutionNonce);
         }
 
-        uint8_t dispatcherPubkey[32];
-        getPublicKeyFromIdentity(dispatcherPubID, dispatcherPubkey);
+        std::cout << "noncePerTask: " << noncePerTask << std::endl;
+        std::cout << "IP:" << nodeIp << ":" << nodePort << std::endl;
+        std::cout << "Dispatcher seed:" << signingSeed << std::endl;
+        std::cout << "Computor seed:" << std::endl;
+        for (const auto it : computorsSeed)
+        {
+            std::cout << it << std::endl;
+        }
+        //taskVectors.resize(computorsSeed.size());
+
         std::vector<std::thread> thr;
 
-        // Fetch task from peers
-        thr.push_back(std::thread(listenerThread, nodeIp, nodePort, dispatcherPubkey));
+        // Run the dispatcher
+        thr.push_back(std::thread(runDispatcher, nodeIp, nodePort, signingSeed, computorsSeed.size()));
 
-        // Submit the task to node
-        //const char* nodeIp, int port, unsigned char* computorSeed, unsigned int noncePerTask, unsigned int constantNonce
-        thr.push_back(std::thread(solutionThread, nodeIp, nodePort, computorSeed, noncePerTask, constantSolutionNonce));
+        // Run the solution submitition
+
+        for (int compI = 0; compI < computorsSeed.size(); ++compI)
+        {
+            thr.push_back(std::thread(solutionThread, computorsSeed[compI].c_str(), noncePerTask, constantSolutionNonce, compI));
+        }
+
+        thr.push_back(std::thread(submitionThread, nodeIp, nodePort));
 
         for (auto& t : thr)
         {
@@ -812,10 +866,48 @@ int main(int argc, char* argv[])
             }
         }
     }
-    else
-    {
-        printHelp();
-    }
+
+    // else if (mode == "solution")
+    // {
+    //     nodeIp = argv[2];
+    //     nodePort = std::atoi(argv[3]);
+    //     char* dispatcherPubID = argv[4];
+    //     char* computorSeed = argv[5];
+    //     unsigned int noncePerTask = std::atoi(argv[6]);
+
+    //     unsigned int constantSolutionNonce = 0xFFFFFFFFUL;
+    //     if (argc == 8)
+    //     {
+    //         constantSolutionNonce = std::atoi(argv[7]);
+    //         printf("Enable submit duplicated solution! Nonce = %u\n", constantSolutionNonce);
+    //     }
+
+    //     uint8_t dispatcherPubkey[32];
+    //     getPublicKeyFromIdentity(dispatcherPubID, dispatcherPubkey);
+    //     std::vector<std::thread> thr;
+
+    //     // Fetch task from peers
+    //     for (int i = 0; i < ipVec.size(); i++)
+    //     {
+    //         thr.push_back(std::thread(listenerThread, ipVec[i].c_str(), nodePort, dispatcherPubkey));
+    //     }
+
+    //     // Submit the task to node
+    //     //const char* nodeIp, int port, unsigned char* computorSeed, unsigned int noncePerTask, unsigned int constantNonce
+    //     thr.push_back(std::thread(solutionThread, nodeIp, nodePort, computorSeed, noncePerTask, constantSolutionNonce));
+
+    //     for (auto& t : thr)
+    //     {
+    //         if (t.joinable())
+    //         {
+    //             t.join();
+    //         }
+    //     }
+    // }
+    // else
+    // {
+    //     printHelp();
+    // }
 
     return 0;
 }
