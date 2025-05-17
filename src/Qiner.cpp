@@ -7,6 +7,7 @@
 #include <queue>
 #include <atomic>
 #include <vector>
+#include <assert.h>
 #ifdef _MSC_VER
 #include <intrin.h>
 #include <winsock2.h>
@@ -69,6 +70,31 @@ void random2(unsigned char* publicKey, unsigned char* nonce, unsigned char* outp
         x = x * 1664525 + 1013904223; // https://en.wikipedia.org/wiki/Linear_congruential_generator#Parameters_in_common_use
     }
 }
+
+void random2(unsigned char* miningSeed, unsigned char* output, unsigned int outputSize) // outputSize must be a multiple of 8
+{
+    unsigned char state[200];
+    memcpy(&state[0], miningSeed, 32);
+    memset(&state[32], 0, sizeof(state) - 32);
+
+    // Data on heap to avoid stack overflow for some compiler
+    std::vector<unsigned char> poolVec(1048576 + 24); // Need a multiple of 200
+    unsigned char* pool = poolVec.data();
+
+    for (unsigned int i = 0; i < poolVec.size(); i += sizeof(state))
+    {
+        KeccakP1600_Permute_12rounds(state);
+        memcpy(&pool[i], state, sizeof(state));
+    }
+
+    unsigned int x = 0; // The same sequence is always used, exploit this for optimization
+    for (unsigned long long i = 0; i < outputSize; i += 8)
+    {
+        *((unsigned long long*) & output[i]) = *((unsigned long long*) & pool[x & (1048576 - 1)]);
+        x = x * 1664525 + 1013904223; // https://en.wikipedia.org/wiki/Linear_congruential_generator#Parameters_in_common_use
+    }
+}
+
 
 struct RequestResponseHeader
 {
@@ -142,195 +168,710 @@ typedef struct
 
 char* nodeIp = NULL;
 int nodePort = 0;
-static constexpr unsigned long long DATA_LENGTH = 256;
-static constexpr unsigned long long NUMBER_OF_HIDDEN_NEURONS = 3000;
-static constexpr unsigned long long NUMBER_OF_NEIGHBOR_NEURONS = 3000;
-static constexpr unsigned long long MAX_DURATION = 3000*3000;
-static constexpr unsigned long long NUMBER_OF_OPTIMIZATION_STEPS = 30;
-static constexpr unsigned int SOLUTION_THRESHOLD = 87;
+static constexpr unsigned long long NUMBER_OF_INPUT_NEURONS = 6000;     // K
+static constexpr unsigned long long NUMBER_OF_OUTPUT_NEURONS = 256;    // L
+static constexpr unsigned long long NUMBER_OF_TICKS = 1000;               // N
+static constexpr unsigned long long MAX_NEIGHBOR_NEURONS = 1024; // 2M. Must divided by 2
+static constexpr unsigned long long POPULATION_THRESHOLD = 8000; // P
+static constexpr unsigned long long NUMBER_OF_MUTATIONS = 1024;
+static constexpr unsigned int SOLUTION_THRESHOLD = NUMBER_OF_OUTPUT_NEURONS * 4 / 5;
 
-static_assert(((DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH)* NUMBER_OF_NEIGHBOR_NEURONS) % 64 == 0, "Synapse size need to be a multipler of 64");
-static_assert(NUMBER_OF_OPTIMIZATION_STEPS < MAX_DURATION, "Number of retries need to smaller than MAX_DURATION");
 
+// Clamp the neuron value
+template <typename T>
+T clampNeuron(T neuronValue)
+{
+    if (neuronValue > 1)
+    {
+        return 1;
+    }
+
+    if (neuronValue < -1)
+    {
+        return -1;
+    }
+    return neuronValue;
+}
+
+template <
+unsigned long long numberOfInputNeurons, // K
+unsigned long long numberOfOutputNeurons,// L
+unsigned long long numberOfTicks,        // N
+unsigned long long numberOfNeighbors,    // 2M
+unsigned long long populationThreshold,  // P
+unsigned long long numberOfMutations,    // S
+unsigned int solutionThreshold
+>
 struct Miner
 {
-    long long data[DATA_LENGTH];
+    static constexpr unsigned long long numberOfNeurons = numberOfInputNeurons + numberOfOutputNeurons;
+    static constexpr unsigned long long maxNumberOfNeurons = populationThreshold;
+    static constexpr unsigned long long maxNumberOfSynapses = populationThreshold * numberOfNeighbors;
+
+    static_assert(maxNumberOfSynapses <= (0xFFFFFFFFFFFFFFFF << 1ULL), "maxNumberOfSynapses must less than or equal MAX_UINT64/2");
+    static_assert(numberOfNeighbors % 2 == 0, "NUMBER_OF_NEIGHBOR_NEURONS must divided by 2");
+    static_assert(populationThreshold > numberOfNeurons, "populationThreshold must be greater than numberOfNeurons");
+    static_assert(numberOfNeurons > numberOfNeighbors, "Number of neurons must be greater than the number of neighbors");
+
     unsigned char computorPublicKey[32];
     unsigned char currentRandomSeed[32];
 
-    void initialize(unsigned char randomSeed[32])
+    void initialize(unsigned char miningSeed[32])
     {
-        random(randomSeed, randomSeed, (unsigned char*)data, sizeof(data));
-        for (unsigned long long i = 0; i < DATA_LENGTH; i++)
-        {
-            data[i] = (data[i] >= 0 ? 1 : -1);
-        }
-
-        memcpy(currentRandomSeed, randomSeed, sizeof(currentRandomSeed));
-        memset(computorPublicKey, 0, sizeof(computorPublicKey));
+        memcpy(currentRandomSeed, miningSeed, sizeof(this->currentRandomSeed));
     }
 
-    void getComputorPublicKey(unsigned char computorPublicKey[32])
+    struct Synapse
     {
-        memcpy(computorPublicKey, this->computorPublicKey, sizeof(this->computorPublicKey));
-    }
+        char weight;
+    };
 
-    void setComputorPublicKey(unsigned char computorPublicKey[32])
+    enum NeuronNeighborSide
     {
-        memcpy(this->computorPublicKey, computorPublicKey, sizeof(this->computorPublicKey));
-    }
+        kLeft,
+        kRight,
+        kMid,
+        kOutOfBound
+    };
 
-    struct
+    // Data for running the ANN
+    struct Neuron
     {
-        long long input[DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH];
-    } neurons;
-    struct
-    {
-        unsigned long long signs[(DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH) * NUMBER_OF_NEIGHBOR_NEURONS / 64];
-        unsigned long long sequence[MAX_DURATION];
-        // Use for randomly select skipped ticks
-        unsigned long long skipTicksNumber[NUMBER_OF_OPTIMIZATION_STEPS];
-    } synapses;
-
-    // Save skipped ticks
-    long long skipTicks[NUMBER_OF_OPTIMIZATION_STEPS];
-
-    // Contained all ticks possible value
-    long long ticksNumbers[MAX_DURATION];
-
-    // Main function for mining
-    bool findSolution(unsigned char nonce[32])
-    {
-        _rdrand64_step((unsigned long long*)&nonce[0]);
-        _rdrand64_step((unsigned long long*)&nonce[8]);
-        _rdrand64_step((unsigned long long*)&nonce[16]);
-        _rdrand64_step((unsigned long long*)&nonce[24]);
-        random2(computorPublicKey, nonce, (unsigned char*)&synapses, sizeof(synapses));
-
-        unsigned int score = 0;
-        long long tailTick = MAX_DURATION - 1;
-        for (long long tick = 0; tick < MAX_DURATION; tick++)
+        enum Type
         {
-            ticksNumbers[tick] = tick;
+            kInput,
+            kOutput,
+            kEvolution,
+        };
+        Type type;
+        char value;
+        bool markForRemoval;
+    };
+
+    // Data for roll back
+    struct ANN
+    {
+        Neuron neurons[maxNumberOfNeurons];
+        Synapse synapses[maxNumberOfSynapses];
+        unsigned long long population;
+    };
+    ANN bestANN;
+    ANN currentANN;
+
+    // Intermediate data
+    struct InitValue
+    {
+        unsigned long long outputNeuronPositions[numberOfOutputNeurons];
+        unsigned long long synapseWeight[maxNumberOfSynapses];
+        unsigned long long synpaseMutation[numberOfMutations];
+    } initValue;
+
+    unsigned long long neuronIndices[numberOfNeurons];
+    unsigned char neuronInitValue[numberOfNeurons];
+    char previousNeuronValue[maxNumberOfNeurons];
+
+    unsigned long long outputNeuronIndices[numberOfOutputNeurons];
+    char outputNeuronInitValue[numberOfOutputNeurons];
+
+    long long neuronValueBuffer[maxNumberOfNeurons];
+
+    void mutate(unsigned char nonce[32], int mutateStep)
+    {
+        // Mutation
+        unsigned long long population = currentANN.population;
+        unsigned long long synapseCount = population * numberOfNeighbors;
+        Synapse* synapses = currentANN.synapses;
+
+
+        // Randomly pick a synapse, randomly increase or decrease its weight by 1 or -1
+        unsigned long long synapseMutation = initValue.synpaseMutation[mutateStep];
+        unsigned long long synapseIdx = (synapseMutation >> 1) % synapseCount;
+        // Randomly increase or decrease its value
+        char weightChange = 0;
+        if ((synapseMutation & 1ULL) == 0)
+        {
+            weightChange = -1;
+        }
+        else
+        {
+            weightChange = 1;
         }
 
-        for (long long l = 0; l < NUMBER_OF_OPTIMIZATION_STEPS; l++)
+        char newWeight = synapses[synapseIdx].weight + weightChange;
+
+        // Valid weight. Update it
+        if (newWeight >= -1 && newWeight <=1 )
         {
-            skipTicks[l] = -1LL;
+            synapses[synapseIdx].weight = newWeight;
+        }
+        else // Invalid weight. Insert a neuron
+        {
+            // Insert the neuron
+            insertNeuron(synapseIdx);
         }
 
-        // Calculate the score with a list of randomly skipped ticks. This list grows if an additional skipped tick
-        // does not worsen the score compared to the previous one.
-        // - Initialize skippedTicks = []
-        // - First, use all ticks. Compute score0 and update the score with score0.
-        // - In the second run, ignore ticks in skippedTicks and try skipping a random tick 'a'.
-        //    + Compute score1.
-        //    + If score1 is not worse than score, add tick 'a' to skippedTicks and update the score with score1.
-        //    + Otherwise, ignore tick 'a'.
-        // - In the third run, ignore ticks in skippedTicks and try skipping a random tick 'b'.
-        //    + Compute score2.
-        //    + If score2 is not worse than score, add tick 'b' to skippedTicks and update the score with score2.
-        //    + Otherwise, ignore tick 'b'.
-        // - Continue this process iteratively.
-        unsigned long long numberOfSkippedTicks = 0;
-        long long skipTick = -1;
-        for (long long l = 0; l < NUMBER_OF_OPTIMIZATION_STEPS; l++)
+        // Clean the ANN
+        while (scanRedundantNeurons() > 0)
         {
-            memset(&neurons, 0, sizeof(neurons));
-            memcpy(&neurons.input[0], data, sizeof(data));
+            cleanANN();
+        }
+    }
 
-            for (long long tick = 0; tick < MAX_DURATION; tick++)
+    // Get the pointer to all outgoing synapse of a neurons
+    Synapse* getSynapses(unsigned long long neuronIndex)
+    {
+        return &currentANN.synapses[neuronIndex * numberOfNeighbors];
+    }
+
+    // Circulate the neuron index
+    unsigned long long clampNeuronIndex(long long neuronIdx, long long value)
+    {
+        unsigned long long population = currentANN.population;
+        long long nnIndex = 0;
+        // Calculate the neuron index (ring structure)
+        if (value >= 0)
+        {
+            nnIndex = neuronIdx + value;
+        }
+        else
+        {
+            nnIndex = neuronIdx + population + value;
+        }
+        nnIndex = nnIndex % population;
+        return (unsigned long long)nnIndex;
+    }
+
+
+    // Remove a neuron and all synapses relate to it
+    void removeNeuron(unsigned long long neuronIdx)
+    {
+        // Scan all its neigbor to remove their outgoing synapse point to the neuron
+        for (long long i = 0; i < numberOfNeighbors; ++i)
+        {
+            long long delta = i - (long long)numberOfNeighbors / 2;
+            unsigned long long neigborNeuronIdx = clampNeuronIndex(neuronIdx, delta);
+            Synapse* pNNSynapses = getSynapses(neigborNeuronIdx);
+
+            // Get the index of synapse point to current neuron and mark it as invalid synapse
+            long long synapseIndexOfNN = numberOfNeighbors - i;
+
+            // The synapse array need to be shifted regard to the remove neuron
+            // Also neuron need to have 2M neighbors, the addtional synapse will be set as zero weight
+            // Case1 [S0 S1 S2 - SR S5 S6]. SR is removed, [S0 S1 S2 S5 S6 0]
+            // Case2 [S0 S1 SR - S3 S4 S5]. SR is removed, [0 S0 S1 S3 S4 S5]
+            if (synapseIndexOfNN >= numberOfNeighbors / 2)
             {
-                // Check if current tick should be skipped
-                if (tick == skipTick)
+                for (long long k = synapseIndexOfNN; k < numberOfNeighbors - 1; ++k)
                 {
-                    continue;
+                    pNNSynapses[k] = pNNSynapses[k + 1];
                 }
-
-                // Skip recorded skipped ticks
-                bool tickShouldBeSkipped = false;
-                for (long long tickIdx = 0; tickIdx < numberOfSkippedTicks; tickIdx++)
+                pNNSynapses[numberOfNeighbors - 1].weight = 0;
+            }
+            else
+            {
+                for (long long k = synapseIndexOfNN; k > 0; --k)
                 {
-                    if (skipTicks[tickIdx] == tick)
+                    pNNSynapses[k] = pNNSynapses[k - 1];
+                }
+                pNNSynapses[0].weight = 0;
+            }
+        }
+
+        // Shift the synapse array and the neuron array
+        for (unsigned long long shiftIdx = neuronIdx; shiftIdx < currentANN.population; shiftIdx++)
+        {
+            currentANN.neurons[shiftIdx] = currentANN.neurons[shiftIdx + 1];
+
+            // Also shift the synapses
+            memcpy(getSynapses(shiftIdx), getSynapses(shiftIdx + 1), numberOfNeighbors * sizeof(Synapse));
+        }
+        currentANN.population--;
+    }
+
+    // Check if the target is on the left side of base
+    int checkNeighborSide(unsigned long long base, unsigned long long target)
+    {
+        unsigned long long population = currentANN.population;
+
+        if (base == target)
+        {
+            return kMid;
+        }
+
+        NeuronNeighborSide side = kMid;
+        unsigned long long distance = 0;
+        unsigned long long diff = 0;
+        unsigned long long circularDiff = 0;
+        if (target > base)
+        {
+            diff = target - base;
+            circularDiff = population + base - target;
+            if (diff < circularDiff)
+            {
+                distance = diff;
+                side = kRight;
+            }
+            else
+            {
+                distance = circularDiff;
+                side = kLeft;
+            }
+        }
+        else
+        {
+            diff = base - target;
+            circularDiff = population + target - base;
+            if (diff < circularDiff)
+            {
+                distance = diff;
+                side = kLeft;
+            }
+            else
+            {
+                distance = circularDiff;
+                side = kRight;
+            }
+        }
+
+        if (distance > numberOfNeighbors / 2)
+        {
+            return kOutOfBound;
+        }
+        return side;
+    }
+
+    void insertNeuron(unsigned long long synapseIdx)
+    {
+        // A synapse have incomingNeighbor and outgoingNeuron, direction incomingNeuron -> outgoingNeuron
+        unsigned long long incomingNeighborSynapseIdx = synapseIdx % numberOfNeighbors;
+        unsigned long long outgoingNeuron = synapseIdx / numberOfNeighbors;
+        // The outgoing synapse of the newly added neuron points to the leftmost one.
+        // The added neuron will be removed, so no further processing is needed.
+        // For example: [incomingNeighbor N0 N1 outgoingNeuron ] with M = 3, [incomingNeighbor N0 N1 outgoingNeuron newNeuron]
+        // new neuron will point to incomingNeighbor which is have distance > 3, it will be removed, so no need any further process
+        if (incomingNeighborSynapseIdx == 0)
+        {
+            return;
+        }
+
+        Synapse* synapses = currentANN.synapses;
+        Neuron* neurons = currentANN.neurons;
+        unsigned long long& population = currentANN.population;
+
+        // Copy original neuron to the inserted one and set it as  Neuron::kEvolution type
+        Neuron insertNeuron;
+        insertNeuron = neurons[outgoingNeuron];
+        insertNeuron.type = Neuron::kEvolution;
+        unsigned long long insertedNeuronIdx = outgoingNeuron + 1;
+
+        char originalWeight = synapses[synapseIdx].weight;
+
+        // Insert the neuron into array, population increased one, all neurons next to original one need to shift right
+        for (unsigned long long i = population; i > outgoingNeuron; --i)
+        {
+            neurons[i] = neurons[i - 1];
+
+            // Also shift the synapses to the right
+            memcpy(getSynapses(i), getSynapses(i - 1), numberOfNeighbors * sizeof(Synapse));
+        }
+        neurons[insertedNeuronIdx] = insertNeuron;
+        population++;
+
+        // Try to update the synapse of inserted neuron. All outgoing synapse is init as zero weight
+        Synapse* pInsertNeuronSynapse = getSynapses(insertedNeuronIdx);
+        for (unsigned long long synIdx = 0; synIdx < numberOfNeighbors; ++synIdx)
+        {
+            pInsertNeuronSynapse[synIdx].weight = 0;
+        }
+
+        // Copy the outgoing synapse of original neuron
+        // Outgoing points to the left
+        if (incomingNeighborSynapseIdx < numberOfNeighbors / 2)
+        {
+            // Decrease by one because the new neuron is next to the original one
+            pInsertNeuronSynapse[incomingNeighborSynapseIdx - 1].weight = originalWeight;
+        }
+        else
+        {
+            // No need to adjust the added neuron but need to remove the synapse of the original neuron
+            pInsertNeuronSynapse[incomingNeighborSynapseIdx].weight = originalWeight;
+        }
+
+        // The change of synapse only impact neuron in [originalNeuronIdx - numberOfNeighbors / 2 + 1, originalNeuronIdx +  numberOfNeighbors / 2]
+        // In the new index, it will be  [originalNeuronIdx + 1 - numberOfNeighbors / 2, originalNeuronIdx + 1 + numberOfNeighbors / 2]
+        // [N0 N1 N2 original inserted N4 N5 N6], M = 2.
+        for (long long delta = -numberOfNeighbors / 2; delta <= numberOfNeighbors / 2; ++delta)
+        {
+            unsigned long long updatedNeuronIdx = clampNeuronIndex(insertedNeuronIdx, delta);
+            Synapse* pUpdatedSynapses = getSynapses(updatedNeuronIdx);
+
+            if (delta < 0)
+            {
+                // [N1 N2 original inserted N4 N5 N6], M = 2.
+                // [N1 N2 original]
+                // Left side is kept as it is, only need to shift to the right side
+                for (unsigned long long k = numberOfNeighbors / 2 ; k < numberOfNeighbors; k++)
+                {
+                    // Updated synapse
+                    unsigned long long updatedNeuronNNIdx = clampNeuronIndex(updatedNeuronIdx, k);
+                    if (kRight == checkNeighborSide(insertedNeuronIdx, updatedNeuronNNIdx))
                     {
-                        tickShouldBeSkipped = true;
+                        pUpdatedSynapses[k] = pUpdatedSynapses[k - 1];
+                    }
+                }
+            }
+            else
+            {
+                // Right side is kept as it is, only need to shift to the left side
+                for (unsigned long long k = 0; k < numberOfNeighbors / 2; k++)
+                {
+                    // Updated synapse
+                    unsigned long long updatedNeuronNNIdx = clampNeuronIndex(updatedNeuronIdx, k);
+                    if (updatedNeuronNNIdx == insertedNeuronIdx || kLeft == checkNeighborSide(insertedNeuronIdx, updatedNeuronNNIdx))
+                    {
+                        pUpdatedSynapses[k] = pUpdatedSynapses[k + 1];
+                    }
+                }
+            }
+
+        }
+    }
+
+    // Check which neurons/synapse need to be removed after mutation
+    unsigned long long scanRedundantNeurons()
+    {
+        unsigned long long population = currentANN.population;
+        Synapse* synapses = currentANN.synapses;
+        Neuron* neurons = currentANN.neurons;
+
+        unsigned long long numberOfRedundantNeurons = 0;
+        // After each mutation, we must verify if there are neurons that do not affect the ANN output.
+        // These are neurons that either have all incoming synapse weights as 0,
+        // or all outgoing synapse weights as 0. Such neurons must be removed.
+        for (unsigned long long i = 0; i < population; i++)
+        {
+            neurons[i].markForRemoval = false;
+            if (neurons[i].type == Neuron::kEvolution)
+            {
+                bool allOutGoingZeros = true;
+                bool allIncommingZeros = true;
+
+                // Loop though its synapses for checkout outgoing synapses
+                for (unsigned long long n = 0; n < numberOfNeighbors; n++)
+                {
+                    char synapseW = synapses[i * numberOfNeighbors + n].weight;
+                    if (synapseW != 0)
+                    {
+                        allOutGoingZeros = false;
                         break;
                     }
                 }
-                if (tickShouldBeSkipped)
-                {
-                    continue;
-                }
 
-                // Compute neurons
-                const unsigned long long neuronIndex = DATA_LENGTH + synapses.sequence[tick] % (NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH);
-                const unsigned long long neighborNeuronIndex = (synapses.sequence[tick] / (NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH)) % NUMBER_OF_NEIGHBOR_NEURONS;
-                unsigned long long supplierNeuronIndex;
-                if (neighborNeuronIndex < NUMBER_OF_NEIGHBOR_NEURONS / 2)
+                // Loop through the neighbor neurons to check all incoming synapses
+                for (unsigned long long n = 0; n <= numberOfNeighbors; n++)
                 {
-                    supplierNeuronIndex = (neuronIndex - (NUMBER_OF_NEIGHBOR_NEURONS / 2) + neighborNeuronIndex + (DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH)) % (DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH);
+                    if (n == numberOfNeighbors / 2)
+                    {
+                        continue;
+                    }
+                    unsigned long long nnIdx = clampNeuronIndex(i + n, -numberOfNeighbors / 2);
+                    char synapseW = synapses[nnIdx * numberOfNeighbors].weight;
+                    if (synapseW != 0)
+                    {
+                        allIncommingZeros = false;
+                        break;
+                    }
+                }
+                if (allOutGoingZeros || allIncommingZeros)
+                {
+                    neurons[i].markForRemoval = true;
+                    numberOfRedundantNeurons++;
+                }
+            }
+        }
+        return numberOfRedundantNeurons;
+    }
+
+    // Remove neurons and synapses that do not affect the ANN
+    void cleanANN()
+    {
+        Synapse* synapses = currentANN.synapses;
+        Neuron* neurons = currentANN.neurons;
+        unsigned long long& population = currentANN.population;
+
+        // Scan and remove neurons/synapses
+        unsigned long long neuronIdx = 0;
+        while (neuronIdx < population)
+        {
+            if (neurons[neuronIdx].markForRemoval)
+            {
+                // Remove it from the neuron list. Overwrite data
+                // Remove its synapses in the synapses array
+                removeNeuron(neuronIdx);
+            }
+            else
+            {
+                neuronIdx++;
+            }
+        }
+    }
+
+    void processTick()
+    {
+        unsigned long long population = currentANN.population;
+        Synapse* synapses = currentANN.synapses;
+        Neuron* neurons = currentANN.neurons;
+
+        // Memset value of current one
+        memset(neuronValueBuffer, 0, sizeof(neuronValueBuffer));
+
+        // Loop though all neurons
+        for (long long n = 0; n < population; ++n)
+        {
+            const Synapse* kSynapses = getSynapses(n);
+            long long neuronValue = neurons[n].value;
+            // Scan through all neighbor neurons and sum all connected neurons.
+            // The synapses are arranged as neuronIndex * numberOfNeighbors
+            for (long long m = 0; m < numberOfNeighbors; m++)
+            {
+                char synapseWeight = kSynapses[m].weight;
+                unsigned long long nnIndex = 0 ;
+                if ( m < numberOfNeighbors / 2)
+                {
+                    nnIndex = clampNeuronIndex(n + m, -numberOfNeighbors / 2);
                 }
                 else
                 {
-                    supplierNeuronIndex = (neuronIndex + 1 - (NUMBER_OF_NEIGHBOR_NEURONS / 2) + neighborNeuronIndex + (DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH)) % (DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + DATA_LENGTH);
-                }
-                const unsigned long long offset = neuronIndex * NUMBER_OF_NEIGHBOR_NEURONS + neighborNeuronIndex;
-
-                if (!(synapses.signs[offset / 64] & (1ULL << (offset % 64))))
-                {
-                    neurons.input[neuronIndex] += neurons.input[supplierNeuronIndex];
-                }
-                else
-                {
-                    neurons.input[neuronIndex] -= neurons.input[supplierNeuronIndex];
+                    nnIndex = clampNeuronIndex(n + m + 1, -numberOfNeighbors / 2);
                 }
 
-                if (neurons.input[neuronIndex] > 1)
-                {
-                    neurons.input[neuronIndex] = 1;
-                }
-                if (neurons.input[neuronIndex] < -1)
-                {
-                    neurons.input[neuronIndex] = -1;
-                }
+                // Weight-sum
+                neuronValueBuffer[nnIndex] += synapseWeight * neuronValue;
             }
+        }
 
-            // Compute the score
-            unsigned int currentScore = 0;
-            for (unsigned long long i = 0; i < DATA_LENGTH; i++)
+        // Clamp the neuron value
+        for (long long n = 0; n < population; ++n)
+        {
+            long long neuronValue = clampNeuron(neuronValueBuffer[n]);
+            neurons[n].value = neuronValue;
+        }
+    }
+
+    void runTickSimulation()
+    {
+        unsigned long long population = currentANN.population;
+        Synapse* synapses = currentANN.synapses;
+        Neuron* neurons = currentANN.neurons;
+
+        // Save the neuron value for comparison
+        for (unsigned long long i = 0 ; i < population; ++i)
+        {
+            // Backup the neuron value
+            previousNeuronValue[i] = neurons[i].value;
+        }
+
+        for(unsigned long long tick = 0; tick < numberOfTicks; ++tick)
+        {
+            processTick();
+            // Check exit conditions:
+            // - N ticks have passed (already in for loop)
+            // - All neuron values are unchanged
+            // - All output neurons have non-zero values
+            bool shouldExit = true;
+            bool allNeuronsUnchanged = true;
+            bool allOutputNeuronsIsNonZeros = true;
+            for (long long n = 0; n < population; ++n)
             {
-                if (data[i] == neurons.input[DATA_LENGTH + NUMBER_OF_HIDDEN_NEURONS + i])
+                // Neuron unchanged check
+                if (previousNeuronValue[n] != neurons[n].value)
                 {
-                    currentScore++;
+                    allNeuronsUnchanged = false;
+                }
+
+                // Ouput neuron value check
+                if (neurons[n].type == Neuron::kOutput && neurons[n].value == 0)
+                {
+                    allOutputNeuronsIsNonZeros = false;
                 }
             }
 
-            // Update score if below satisfied
-            // - This is the first run without skipping any ticks
-            // - Current score is not worse than previous score
-            if (skipTick == -1 || currentScore >= score)
+            if (allOutputNeuronsIsNonZeros || allNeuronsUnchanged)
             {
-                score = currentScore;
-                // For the first run, don't need to update the skipped ticks list
-                if (skipTick != -1 )
-                {
-                    skipTicks[numberOfSkippedTicks] = skipTick;
-                    numberOfSkippedTicks++;
-                }
+                break;
             }
 
-            // Randomly choose a tick to skip for the next round and avoid duplicated pick already chosen one
-            long long randomTick = synapses.skipTicksNumber[l] % (MAX_DURATION - l);
-            skipTick = ticksNumbers[randomTick];
-            // Replace the chosen tick position with current tail to make sure if this tick is not chosen again
-            // the skipTick is still not duplicated with previous ones.
-            ticksNumbers[randomTick] = ticksNumbers[tailTick];
-            tailTick--;
+            // Copy the neuron value
+            for (long long n = 0; n < population; ++n)
+            {
+                previousNeuronValue[n] = neurons[n].value;
+            }
+        }
+    }
 
+    unsigned int computeNonMatchingOutput()
+    {
+        unsigned long long population = currentANN.population;
+        Neuron* neurons = currentANN.neurons;
+
+        // Compute the non-matching value R between output neuron value and initial value
+        // Because the output neuron order never changes, the order is preserved
+        unsigned int R = 0;
+        unsigned long long outputIdx = 0;
+        for (unsigned long long i = 0; i < population; i++)
+        {
+            if (neurons[i].type == Neuron::kOutput)
+            {
+                if (neurons[i].value != outputNeuronInitValue[outputIdx])
+                {
+                    R++;
+                }
+                outputIdx++;
+            }
+        }
+        return R;
+    }
+
+    unsigned int initializeANN(unsigned char nonce[32])
+    {
+        unsigned long long& population = currentANN.population;
+        Synapse* synapses = currentANN.synapses;
+        Neuron* neurons = currentANN.neurons;
+
+        // Initialization
+        population = numberOfNeurons;
+
+        // Initalize with nonce and public key
+        static_assert(sizeof(InitValue) % 8 == 0, "InitValue size must divided by 8");
+        random2(computorPublicKey, nonce, (unsigned char*)&initValue, sizeof(InitValue));
+
+        // Randomly choose the positions of neurons types
+        for (unsigned long long i = 0 ; i < population; ++i)
+        {
+            neuronIndices[i] = i;
+            neurons[i].type = Neuron::kInput;
+        }
+        unsigned long long neuronCount = population;
+        for (unsigned long long i = 0 ; i < numberOfOutputNeurons; ++i)
+        {
+            unsigned long long inputNeuronIdx = initValue.outputNeuronPositions[i] % neuronCount;
+
+            // Fill the neuron type
+            neurons[neuronIndices[inputNeuronIdx]].type = Neuron::kOutput;
+            outputNeuronIndices[i] = neuronIndices[inputNeuronIdx];
+
+            // This index is used, copy the end of indices array to current position and decrease the number of picking neurons
+            neuronCount = neuronCount - 1;
+            neuronIndices[inputNeuronIdx] = neuronIndices[neuronCount];
+        }
+
+        // Synapse weight initialization
+        const unsigned long long initNumberOfSynapses = population * numberOfNeighbors;
+        for (unsigned long long i = 0 ; i < initNumberOfSynapses; ++i)
+        {
+            if (initValue.synapseWeight[i] % 3 == 0)
+            {
+                synapses[i].weight = 0;
+            }
+            else if (initValue.synapseWeight[i] % 3 == 1)
+            {
+                synapses[i].weight = 1;
+            }
+            else if (initValue.synapseWeight[i] % 3 == 2)
+            {
+                synapses[i].weight = -1;
+            }
+        }
+
+        // Init the neuron input and output value
+        random2(currentRandomSeed, (unsigned char*)neuronInitValue, sizeof(neuronInitValue));
+        for (unsigned long long i = 0 ; i < population; ++i)
+        {
+            if (neuronInitValue[i] % 3 == 0)
+            {
+                neurons[i].value = 0;
+            }
+            else if (neuronInitValue[i] % 3 == 1)
+            {
+                neurons[i].value = 1;
+            }
+            else
+            {
+                neurons[i].value = -1;
+            }
+        }
+
+        // Convert value of neuron to trits (keeping 1 as 1, and changing 0 to -1.).
+        for (unsigned long long i = 0 ; i < population; ++i)
+        {
+            if (neurons[i].value == 0)
+            {
+                neurons[i].value = -1;
+            }
+        }
+
+        // Save the output value
+        for (unsigned long long i = 0 ; i < numberOfOutputNeurons; ++i)
+        {
+            outputNeuronInitValue[i] = neurons[outputNeuronIndices[i]].value;
+        }
+
+        // Ticks simulation
+        runTickSimulation();
+
+        // Copy the state for rollback later
+        memcpy(&bestANN, &currentANN, sizeof(ANN));
+
+        // Compute R and roll back if neccessary
+        unsigned int R = computeNonMatchingOutput();
+
+        return R;
+    }
+
+    // Main function for mining
+    bool findSolution(unsigned char* publicKey, unsigned char* nonce)
+    {
+        memcpy(computorPublicKey, publicKey, sizeof(computorPublicKey));
+
+        // Initialize
+        unsigned int bestR = initializeANN(nonce);
+
+        for (unsigned long long s = 0; s < numberOfMutations; ++s)
+        {
+
+            // Do the mutation
+            mutate(nonce, s);
+
+            // Exit if the number of population reaches the maximum allowed
+            if (currentANN.population >= populationThreshold)
+            {
+                break;
+            }
+
+            // Ticks simulation
+            runTickSimulation();
+
+            // Compute R and roll back if neccessary
+            unsigned int R = computeNonMatchingOutput();
+            if (R > bestR)
+            {
+                // Roll back
+                memcpy(&currentANN, &bestANN, sizeof(bestANN));
+            }
+            else
+            {
+                bestR = R;
+
+                // Better R. Save the state
+                memcpy(&bestANN, &currentANN, sizeof(bestANN));
+            }
+
+            assert(bestANN.population <= populationThreshold);
         }
 
         // Check score
-        if (score >= SOLUTION_THRESHOLD)
+        unsigned int score = numberOfOutputNeurons - bestR;
+        if (score >= solutionThreshold)
         {
             return true;
         }
@@ -406,17 +947,22 @@ bool isZeros(const unsigned char* value)
     }
     return true;
 }
+typedef Miner<NUMBER_OF_INPUT_NEURONS, NUMBER_OF_OUTPUT_NEURONS, NUMBER_OF_TICKS, MAX_NEIGHBOR_NEURONS, POPULATION_THRESHOLD, NUMBER_OF_MUTATIONS, SOLUTION_THRESHOLD> ActiveMiner;
 
 int miningThreadProc()
 {
-    std::unique_ptr<Miner> miner(new Miner());
+    std::unique_ptr<ActiveMiner> miner(new ActiveMiner());
     miner->initialize(randomSeed);
-    miner->setComputorPublicKey(computorPublicKey);
 
     std::array<unsigned char, 32> nonce;
     while (!state)
     {
-        if (miner->findSolution(nonce.data()))
+        _rdrand64_step((unsigned long long*)&nonce.data()[0]);
+        _rdrand64_step((unsigned long long*)&nonce.data()[8]);
+        _rdrand64_step((unsigned long long*)&nonce.data()[16]);
+        _rdrand64_step((unsigned long long*)&nonce.data()[24]);
+
+        if (miner->findSolution(computorPublicKey, nonce.data()))
         {
             {
                 std::lock_guard<std::mutex> guard(foundNonceLock);
@@ -589,7 +1135,7 @@ int main(int argc, char* argv[])
             hexToByte(argv[5], randomSeed, 32);
             unsigned int numberOfThreads = atoi(argv[6]);
             printf("%d threads are used.\n", numberOfThreads);
-            miningThreads.resize(numberOfThreads);
+            miningThreads.reserve(numberOfThreads);
             for (unsigned int i = numberOfThreads; i-- > 0; )
             {
                 miningThreads.emplace_back(miningThreadProc);
