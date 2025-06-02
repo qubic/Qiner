@@ -212,6 +212,7 @@ struct Miner
     static_assert(numberOfNeighbors % 2 == 0, "NUMBER_OF_NEIGHBOR_NEURONS must divided by 2");
     static_assert(populationThreshold > numberOfNeurons, "populationThreshold must be greater than numberOfNeurons");
     static_assert(numberOfNeurons > numberOfNeighbors, "Number of neurons must be greater than the number of neighbors");
+    static_assert(numberOfNeurons % 8 == 0, "numberOfNeurons must divided by 8");
 
     unsigned char computorPublicKey[32];
     unsigned char currentRandomSeed[32];
@@ -271,7 +272,7 @@ struct Miner
     char previousNeuronValue[maxNumberOfNeurons];
 
     unsigned long long outputNeuronIndices[numberOfOutputNeurons];
-    char outputNeuronInitValue[numberOfOutputNeurons];
+    char outputNeuronExpectedValue[numberOfOutputNeurons];
 
     long long neuronValueBuffer[maxNumberOfNeurons];
 
@@ -722,7 +723,7 @@ struct Miner
         {
             if (neurons[i].type == Neuron::kOutput)
             {
-                if (neurons[i].value != outputNeuronInitValue[outputIdx])
+                if (neurons[i].value != outputNeuronExpectedValue[outputIdx])
                 {
                     R++;
                 }
@@ -754,15 +755,15 @@ struct Miner
         unsigned long long neuronCount = population;
         for (unsigned long long i = 0 ; i < numberOfOutputNeurons; ++i)
         {
-            unsigned long long inputNeuronIdx = initValue.outputNeuronPositions[i] % neuronCount;
+            unsigned long long outputNeuronIdx = initValue.outputNeuronPositions[i] % neuronCount;
 
             // Fill the neuron type
-            neurons[neuronIndices[inputNeuronIdx]].type = Neuron::kOutput;
-            outputNeuronIndices[i] = neuronIndices[inputNeuronIdx];
+            neurons[neuronIndices[outputNeuronIdx]].type = Neuron::kOutput;
+            outputNeuronIndices[i] = neuronIndices[outputNeuronIdx];
 
             // This index is used, copy the end of indices array to current position and decrease the number of picking neurons
             neuronCount = neuronCount - 1;
-            neuronIndices[inputNeuronIdx] = neuronIndices[neuronCount];
+            neuronIndices[outputNeuronIdx] = neuronIndices[neuronCount];
         }
 
         // Synapse weight initialization
@@ -783,37 +784,39 @@ struct Miner
             }
         }
 
-        // Init the neuron input and output value
+        // Init the neuron input and expected output value
         random2(currentRandomSeed, (unsigned char*)neuronInitValue, sizeof(neuronInitValue));
         for (unsigned long long i = 0 ; i < population; ++i)
         {
+            // Random the neuron value
+            char neuronValue = 0;
             if (neuronInitValue[i] % 3 == 0)
             {
-                neurons[i].value = 0;
+                neuronValue = 0;
             }
             else if (neuronInitValue[i] % 3 == 1)
             {
-                neurons[i].value = 1;
+                neuronValue = 1;
             }
             else
             {
-                neurons[i].value = -1;
+                neuronValue = -1;
             }
-        }
 
-        // Convert value of neuron to trits (keeping 1 as 1, and changing 0 to -1.).
-        for (unsigned long long i = 0 ; i < population; ++i)
-        {
-            if (neurons[i].value == 0)
+            // Input will use the init value
+            if (neurons[i].type == Neuron::kInput)
             {
-                neurons[i].value = -1;
+                // Convert value of neuron to trits (keeping 1 as 1, and changing 0 to -1.).
+                neurons[i].value = (neuronValue == 0) ? -1 : neuronValue;
             }
-        }
+            else if (neurons[i].type == Neuron::kOutput)
+            {
+                // Ouput init as zeros
+                neurons[i].value = 0;
 
-        // Save the output value
-        for (unsigned long long i = 0 ; i < numberOfOutputNeurons; ++i)
-        {
-            outputNeuronInitValue[i] = neurons[outputNeuronIndices[i]].value;
+                // Random value used as expected value
+                outputNeuronExpectedValue[i] = neuronValue;
+            }
         }
 
         // Ticks simulation
