@@ -506,7 +506,7 @@ struct Miner
         // The change of synapse only impact neuron in [originalNeuronIdx - numberOfNeighbors / 2 + 1, originalNeuronIdx +  numberOfNeighbors / 2]
         // In the new index, it will be  [originalNeuronIdx + 1 - numberOfNeighbors / 2, originalNeuronIdx + 1 + numberOfNeighbors / 2]
         // [N0 N1 N2 original inserted N4 N5 N6], M = 2.
-        for (long long delta = -numberOfNeighbors / 2; delta <= numberOfNeighbors / 2; ++delta)
+        for (long long delta = -(long long)numberOfNeighbors / 2; delta <= numberOfNeighbors / 2; ++delta)
         {
             unsigned long long updatedNeuronIdx = clampNeuronIndex(insertedNeuronIdx, delta);
             Synapse* pUpdatedSynapses = getSynapses(updatedNeuronIdx);
@@ -580,7 +580,7 @@ struct Miner
                     {
                         continue;
                     }
-                    unsigned long long nnIdx = clampNeuronIndex(i + n, -numberOfNeighbors / 2);
+                    unsigned long long nnIdx = clampNeuronIndex(i + n, -(long long)numberOfNeighbors / 2);
                     char synapseW = synapses[nnIdx * numberOfNeighbors].weight;
                     if (synapseW != 0)
                     {
@@ -644,11 +644,11 @@ struct Miner
                 unsigned long long nnIndex = 0 ;
                 if ( m < numberOfNeighbors / 2)
                 {
-                    nnIndex = clampNeuronIndex(n + m, -numberOfNeighbors / 2);
+                    nnIndex = clampNeuronIndex(n + m, -(long long)numberOfNeighbors / 2);
                 }
                 else
                 {
-                    nnIndex = clampNeuronIndex(n + m + 1, -numberOfNeighbors / 2);
+                    nnIndex = clampNeuronIndex(n + m + 1, -(long long)numberOfNeighbors / 2);
                 }
 
                 // Weight-sum
