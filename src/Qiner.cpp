@@ -209,7 +209,7 @@ struct Miner
     static constexpr unsigned long long maxNumberOfSynapses = populationThreshold * numberOfNeighbors;
 
     static_assert(maxNumberOfSynapses <= (0xFFFFFFFFFFFFFFFF << 1ULL), "maxNumberOfSynapses must less than or equal MAX_UINT64/2");
-    static_assert(numberOfNeighbors % 2 == 0, "NUMBER_OF_NEIGHBOR_NEURONS must divided by 2");
+    static_assert(numberOfNeighbors % 2 == 0, "numberOfNeighbors must divided by 2");
     static_assert(populationThreshold > numberOfNeurons, "populationThreshold must be greater than numberOfNeurons");
     static_assert(numberOfNeurons > numberOfNeighbors, "Number of neurons must be greater than the number of neighbors");
     static_assert(numberOfNeurons % 8 == 0, "numberOfNeurons must divided by 8");
@@ -267,8 +267,13 @@ struct Miner
         unsigned long long synpaseMutation[numberOfMutations];
     } initValue;
 
+    struct MiningData
+    {
+        unsigned char inputNeuronRandomNumber[numberOfInputNeurons];
+        unsigned char outputNeuronRandomNumber[numberOfOutputNeurons];
+    } miningData;
+
     unsigned long long neuronIndices[numberOfNeurons];
-    unsigned char neuronInitValue[numberOfNeurons];
     char previousNeuronValue[maxNumberOfNeurons];
 
     unsigned long long outputNeuronIndices[numberOfOutputNeurons];
@@ -733,6 +738,80 @@ struct Miner
         return R;
     }
 
+    void generateMiningData(unsigned char miningSeed[32])
+    {
+        // Init the neuron input and expected output value
+        random2(miningSeed, (unsigned char*)&miningData, sizeof(miningData));
+    }
+
+    void initInputNeuron()
+    {
+        unsigned long long population = currentANN.population;
+        Neuron* neurons = currentANN.neurons;
+        unsigned long long inputNeuronInitIndex = 0;
+        for (unsigned long long i = 0 ; i < population; ++i)
+        {
+            // Input will use the init value
+            if (neurons[i].type == Neuron::kInput)
+            {
+                char neuronValue = 0;
+                unsigned char randomValue = miningData.inputNeuronRandomNumber[inputNeuronInitIndex];
+                inputNeuronInitIndex++;
+                if (randomValue % 3 == 0)
+                {
+                    neuronValue = 0;
+                }
+                else if (randomValue % 3 == 1)
+                {
+                    neuronValue = 1;
+                }
+                else
+                {
+                    neuronValue = -1;
+                }
+
+                // Convert value of neuron to trits (keeping 1 as 1, and changing 0 to -1.).
+                neurons[i].value = (neuronValue == 0) ? -1 : neuronValue;
+            }
+        }
+    }
+
+    void initOutputNeuron()
+    {
+        unsigned long long population = currentANN.population;
+        Neuron* neurons = currentANN.neurons;
+        for (unsigned long long i = 0 ; i < population; ++i)
+        {
+            if (neurons[i].type == Neuron::kOutput)
+            {
+                neurons[i].value = 0;
+            }
+        }
+    }
+
+    void initExpectedOutputNeuron()
+    {
+        for (unsigned long long i = 0 ; i < numberOfOutputNeurons; ++i)
+        {
+            char neuronValue = 0;
+            unsigned char randomNumber = miningData.outputNeuronRandomNumber[i];
+            if (randomNumber % 3 == 0)
+            {
+                neuronValue = 0;
+            }
+            else if (randomNumber % 3 == 1)
+            {
+                neuronValue = 1;
+            }
+            else
+            {
+                neuronValue = -1;
+            }
+
+            outputNeuronExpectedValue[i] = neuronValue;
+        }
+    }
+
     unsigned int initializeANN(unsigned char nonce[32])
     {
         unsigned long long& population = currentANN.population;
@@ -784,40 +863,15 @@ struct Miner
             }
         }
 
-        // Init the neuron input and expected output value
-        random2(currentRandomSeed, (unsigned char*)neuronInitValue, sizeof(neuronInitValue));
-        for (unsigned long long i = 0 ; i < population; ++i)
-        {
-            // Random the neuron value
-            char neuronValue = 0;
-            if (neuronInitValue[i] % 3 == 0)
-            {
-                neuronValue = 0;
-            }
-            else if (neuronInitValue[i] % 3 == 1)
-            {
-                neuronValue = 1;
-            }
-            else
-            {
-                neuronValue = -1;
-            }
+        // Generate data using mining seed
+        generateMiningData(currentRandomSeed);
 
-            // Input will use the init value
-            if (neurons[i].type == Neuron::kInput)
-            {
-                // Convert value of neuron to trits (keeping 1 as 1, and changing 0 to -1.).
-                neurons[i].value = (neuronValue == 0) ? -1 : neuronValue;
-            }
-            else if (neurons[i].type == Neuron::kOutput)
-            {
-                // Ouput init as zeros
-                neurons[i].value = 0;
+        // Init input neuron value and output neuron
+        initInputNeuron();
+        initOutputNeuron();
 
-                // Random value used as expected value
-                outputNeuronExpectedValue[i] = neuronValue;
-            }
-        }
+        // Init expected output neuron
+        initExpectedOutputNeuron();
 
         // Ticks simulation
         runTickSimulation();
