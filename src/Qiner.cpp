@@ -511,32 +511,48 @@ struct Miner
             unsigned long long updatedNeuronIdx = clampNeuronIndex(insertedNeuronIdx, delta);
             Synapse* pUpdatedSynapses = getSynapses(updatedNeuronIdx);
 
-            if (delta < 0)
+            // Generate a list of neighbor index of current updated neuron NN
+            // Find the location of the inserted neuron in the list of neighbors
+            long long insertedNeuronIdxInNeigborList = -1;
+            for (long long k = 0 ; k < numberOfNeighbors; k++)
             {
-                // [N1 N2 original inserted N4 N5 N6], M = 2.
-                // [N1 N2 original]
-                // Left side is kept as it is, only need to shift to the right side
-                for (unsigned long long k = numberOfNeighbors / 2 ; k < numberOfNeighbors; k++)
+                unsigned long long nnIndex = 0;
+                if (k < (numberOfNeighbors / 2))
                 {
-                    // Updated synapse
-                    unsigned long long updatedNeuronNNIdx = clampNeuronIndex(updatedNeuronIdx, k);
-                    if (kRight == checkNeighborSide(insertedNeuronIdx, updatedNeuronNNIdx))
-                    {
-                        pUpdatedSynapses[k] = pUpdatedSynapses[k - 1];
-                    }
+                    nnIndex = clampNeuronIndex(updatedNeuronIdx + k, -(long long)numberOfNeighbors / 2);
+                }
+                else
+                {
+                    nnIndex = clampNeuronIndex(updatedNeuronIdx + k + 1, -(long long)numberOfNeighbors / 2);
+                }
+
+                if (nnIndex == insertedNeuronIdx)
+                {
+                    insertedNeuronIdxInNeigborList = k;
                 }
             }
-            else
+
+            // Something is wrong here if we can not find the
+            assert(insertedNeuronIdxInNeigborList >= 0);
+
+            // [N0 N1 N2 original inserted N4 N5 N6], M = 2.
+            // Case: neurons in range [N0 N1 N2 original], right synapses will be affected
+            if (delta < 0)
             {
-                // Right side is kept as it is, only need to shift to the left side
-                for (unsigned long long k = 0; k < numberOfNeighbors / 2; k++)
+                // Left side is kept as it is, only need to shift to the right side
+                for (unsigned long long k = numberOfNeighbors - 1 ; k >= insertedNeuronIdxInNeigborList; --k)
                 {
                     // Updated synapse
-                    unsigned long long updatedNeuronNNIdx = clampNeuronIndex(updatedNeuronIdx, k);
-                    if (updatedNeuronNNIdx == insertedNeuronIdx || kLeft == checkNeighborSide(insertedNeuronIdx, updatedNeuronNNIdx))
-                    {
-                        pUpdatedSynapses[k] = pUpdatedSynapses[k + 1];
-                    }
+                    pUpdatedSynapses[k] = pUpdatedSynapses[k - 1];
+                }
+            }
+            else // Case: neurons in range [inserted N4 N5 N6], left synapses will be affected
+            {
+                // Right side is kept as it is, only need to shift to the left side
+                for (unsigned long long k = 0; k <= insertedNeuronIdxInNeigborList; ++k)
+                {
+                    // Updated synapse
+                    pUpdatedSynapses[k] = pUpdatedSynapses[k + 1];
                 }
             }
 
