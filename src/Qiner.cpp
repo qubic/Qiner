@@ -451,14 +451,6 @@ struct Miner
         // A synapse have incomingNeighbor and outgoingNeuron, direction incomingNeuron -> outgoingNeuron
         unsigned long long incomingNeighborSynapseIdx = synapseIdx % numberOfNeighbors;
         unsigned long long outgoingNeuron = synapseIdx / numberOfNeighbors;
-        // The outgoing synapse of the newly added neuron points to the leftmost one.
-        // The added neuron will be removed, so no further processing is needed.
-        // For example: [incomingNeighbor N0 N1 outgoingNeuron ] with M = 3, [incomingNeighbor N0 N1 outgoingNeuron newNeuron]
-        // new neuron will point to incomingNeighbor which is have distance > 3, it will be removed, so no need any further process
-        if (incomingNeighborSynapseIdx == 0)
-        {
-            return;
-        }
 
         Synapse* synapses = currentANN.synapses;
         Neuron* neurons = currentANN.neurons;
@@ -494,8 +486,12 @@ struct Miner
         // Outgoing points to the left
         if (incomingNeighborSynapseIdx < numberOfNeighbors / 2)
         {
-            // Decrease by one because the new neuron is next to the original one
-            pInsertNeuronSynapse[incomingNeighborSynapseIdx - 1].weight = originalWeight;
+            if (incomingNeighborSynapseIdx > 0)
+            {
+                // Decrease by one because the new neuron is next to the original one
+                pInsertNeuronSynapse[incomingNeighborSynapseIdx - 1].weight = originalWeight;
+            }
+            // Incase of the outgoing synapse point too far, don't add the synapse
         }
         else
         {
