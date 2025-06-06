@@ -354,8 +354,7 @@ struct Miner
         // Scan all its neigbor to remove their outgoing synapse point to the neuron
         for (long long i = 0; i < numberOfNeighbors; ++i)
         {
-            long long delta = i - (long long)numberOfNeighbors / 2;
-            unsigned long long neigborNeuronIdx = clampNeuronIndex(neuronIdx, delta);
+            unsigned long long neigborNeuronIdx = getNeighborNeuronIndex(neuronIdx, i);
             Synapse* pNNSynapses = getSynapses(neigborNeuronIdx);
 
             // Get the index of synapse point to current neuron and mark it as invalid synapse
@@ -446,6 +445,20 @@ struct Miner
         return side;
     }
 
+    unsigned long long getNeighborNeuronIndex(unsigned long long neuronIndex, unsigned long long neighborOffset)
+    {
+        unsigned long long nnIndex = 0;
+        if (neighborOffset < (numberOfNeighbors / 2))
+        {
+            nnIndex = clampNeuronIndex(neuronIndex + neighborOffset, -(long long)numberOfNeighbors / 2);
+        }
+        else
+        {
+            nnIndex = clampNeuronIndex(neuronIndex + neighborOffset + 1, -(long long)numberOfNeighbors / 2);
+        }
+        return nnIndex;
+    }
+
     void insertNeuron(unsigned long long synapseIdx)
     {
         // A synapse have incomingNeighbor and outgoingNeuron, direction incomingNeuron -> outgoingNeuron
@@ -512,16 +525,7 @@ struct Miner
             long long insertedNeuronIdxInNeigborList = -1;
             for (long long k = 0 ; k < numberOfNeighbors; k++)
             {
-                unsigned long long nnIndex = 0;
-                if (k < (numberOfNeighbors / 2))
-                {
-                    nnIndex = clampNeuronIndex(updatedNeuronIdx + k, -(long long)numberOfNeighbors / 2);
-                }
-                else
-                {
-                    nnIndex = clampNeuronIndex(updatedNeuronIdx + k + 1, -(long long)numberOfNeighbors / 2);
-                }
-
+                unsigned long long nnIndex = getNeighborNeuronIndex(updatedNeuronIdx, k);
                 if (nnIndex == insertedNeuronIdx)
                 {
                     insertedNeuronIdxInNeigborList = k;
