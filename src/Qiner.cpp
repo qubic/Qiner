@@ -25,49 +25,57 @@
 #include "K12AndKeyUtil.h"
 #include "keyUtils.h"
 
+constexpr unsigned long long POOL_VEC_SIZE = (((1ULL<<32) + 64)) >> 3; // 2^32+64 bits
 
-void random(unsigned char* publicKey, unsigned char* nonce, unsigned char* output, unsigned int outputSize)
+std::vector<unsigned char> poolVec(POOL_VEC_SIZE + 80); // padding for multiple of 200
+
+void generatePool(unsigned char* miningSeed, unsigned char* pool)
 {
     unsigned char state[200];
-    memcpy(&state[0], publicKey, 32);
-    memcpy(&state[32], nonce, 32);
-    memset(&state[64], 0, sizeof(state) - 64);
-
-    for (unsigned int i = 0; i < outputSize / sizeof(state); i++)
-    {
-        KeccakP1600_Permute_12rounds(state);
-        memcpy(output, state, sizeof(state));
-        output += sizeof(state);
-    }
-    if (outputSize % sizeof(state))
-    {
-        KeccakP1600_Permute_12rounds(state);
-        memcpy(output, state, outputSize % sizeof(state));
-    }
-}
-
-void random2(unsigned char* publicKey, unsigned char* nonce, unsigned char* output, unsigned int outputSize) // outputSize must be a multiple of 8
-{
-    unsigned char state[200];
-    memcpy(&state[0], publicKey, 32);
-    memcpy(&state[32], nonce, 32);
-    memset(&state[64], 0, sizeof(state) - 64);
-
-    // Data on heap to avoid stack overflow for some compiler
-    std::vector<unsigned char> poolVec(1048576 + 24); // Need a multiple of 200
-    unsigned char* pool = poolVec.data();
+    memcpy(&state[0], miningSeed, 32);
+    memset(&state[32], 0, sizeof(state) - 32);
 
     for (unsigned int i = 0; i < poolVec.size(); i += sizeof(state))
     {
         KeccakP1600_Permute_12rounds(state);
         memcpy(&pool[i], state, sizeof(state));
     }
+}
 
-    unsigned int x = 0; // The same sequence is always used, exploit this for optimization
-    for (unsigned long long i = 0; i < outputSize; i += 8)
+void random2(
+    const unsigned char* publicKey,
+    const unsigned char* nonce,
+    unsigned char* pool,
+    unsigned char* output,
+    unsigned long long outputSize) // outputSize must be a multiple of 8
+{
+    unsigned char combined[64];
+    memcpy(&combined[0], publicKey, 32);
+    memcpy(&combined[32], nonce, 32);
+
+    unsigned char hash[32];
+    KangarooTwelve(combined, 64, hash, 32);
+
+    unsigned long long segment = outputSize / 8;
+    for (int j = 0; j < 8; j++)
     {
-        *((unsigned long long*) & output[i]) = *((unsigned long long*) & pool[x & (1048576 - 1)]);
-        x = x * 1664525 + 1013904223; // https://en.wikipedia.org/wiki/Linear_congruential_generator#Parameters_in_common_use
+        unsigned int x = ((unsigned int*)hash)[j];
+        for (unsigned long long i = segment*j; i < segment*(j+1); i+=8)
+        {
+            unsigned int base = (x >> 3) >> 3;
+            unsigned int m = x & 63;
+            unsigned long long lo = ((unsigned long long*)pool)[base];
+            unsigned long long hi = ((unsigned long long*)pool)[base + 1];
+            if (m == 0)
+            {
+                // some compiler doesn't work with bit shift 0
+                *((unsigned long long*) & output[i]) = lo;
+            }
+            else
+            {
+                *((unsigned long long*) & output[i]) = (lo >> m) | (hi << (64 - m));
+            }
+        }
     }
 }
 
@@ -94,7 +102,6 @@ void random2(unsigned char* miningSeed, unsigned char* output, unsigned int outp
         x = x * 1664525 + 1013904223; // https://en.wikipedia.org/wiki/Linear_congruential_generator#Parameters_in_common_use
     }
 }
-
 
 struct RequestResponseHeader
 {
@@ -220,6 +227,10 @@ struct Miner
     void initialize(unsigned char miningSeed[32])
     {
         memcpy(currentRandomSeed, miningSeed, sizeof(this->currentRandomSeed));
+
+        // Init random2 pool with mining seed
+        generatePool(miningSeed, poolVec.data());
+
     }
 
     struct Synapse
@@ -838,8 +849,8 @@ struct Miner
         population = numberOfNeurons;
 
         // Initalize with nonce and public key
-        static_assert(sizeof(InitValue) % 8 == 0, "InitValue size must divided by 8");
-        random2(computorPublicKey, nonce, (unsigned char*)&initValue, sizeof(InitValue));
+        static_assert(sizeof(InitValue) % 64 == 0, "InitValue size must divided by 64");
+        random2(computorPublicKey, nonce, poolVec.data(), (unsigned char*)&initValue, sizeof(InitValue));
 
         // Randomly choose the positions of neurons types
         for (unsigned long long i = 0 ; i < population; ++i)
