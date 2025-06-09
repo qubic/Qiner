@@ -76,6 +76,7 @@ void random2(
                 *((unsigned long long*) & output[i]) = (lo >> m) | (hi << (64 - m));
             }
         }
+        x = x * 1664525 + 1013904223; // https://en.wikipedia.org/wiki/Linear_congruential_generator#Parameters_in_common_use
     }
 }
 
