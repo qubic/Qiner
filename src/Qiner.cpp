@@ -64,8 +64,10 @@ void random2(
         {
             unsigned int base = (x >> 3) >> 3;
             unsigned int m = x & 63;
-            unsigned long long lo = ((unsigned long long*)pool)[base];
-            unsigned long long hi = ((unsigned long long*)pool)[base + 1];
+
+            unsigned long long lo = ((unsigned long long*)pool)[base] ^ (*((unsigned long long*)&publicKey[0]));
+            unsigned long long hi = ((unsigned long long*)pool)[base + 1] ^ (*((unsigned long long*)&publicKey[8]));
+
             if (m == 0)
             {
                 // some compiler doesn't work with bit shift 0
