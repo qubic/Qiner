@@ -29,9 +29,10 @@ constexpr unsigned long long POOL_VEC_SIZE = (((1ULL<<32) + 64)) >> 3; // 2^32+6
 
 std::vector<unsigned char> poolVec(POOL_VEC_SIZE + 80); // padding for multiple of 200
 
-void generatePool(unsigned char* miningSeed, unsigned char* pool)
+void generateRandom2Pool(unsigned char* miningSeed, unsigned char* pool)
 {
     unsigned char state[200];
+    // same pool to be used by all computors/candidates and pool content changing each phase
     memcpy(&state[0], miningSeed, 32);
     memset(&state[32], 0, sizeof(state) - 32);
 
@@ -47,8 +48,10 @@ void random2(
     const unsigned char* nonce,
     unsigned char* pool,
     unsigned char* output,
-    unsigned long long outputSize) // outputSize must be a multiple of 8
+    unsigned long long outputSizeInByte) // outputSizeInByte must be a multiple of 64
 {
+    assert(outputSizeInByte % 64 == 0);
+
     unsigned char combined[64];
     memcpy(&combined[0], publicKey, 32);
     memcpy(&combined[32], nonce, 32);
@@ -56,7 +59,7 @@ void random2(
     unsigned char hash[32];
     KangarooTwelve(combined, 64, hash, 32);
 
-    unsigned long long segment = outputSize / 8;
+    unsigned long long segment = outputSizeInByte / 8;
     for (int j = 0; j < 8; j++)
     {
         unsigned int x = ((unsigned int*)hash)[j];
@@ -65,25 +68,27 @@ void random2(
             unsigned int base = (x >> 3) >> 3;
             unsigned int m = x & 63;
 
-            unsigned long long lo = ((unsigned long long*)pool)[base] ^ (*((unsigned long long*)&publicKey[0]));
-            unsigned long long hi = ((unsigned long long*)pool)[base + 1] ^ (*((unsigned long long*)&publicKey[8]));
+            unsigned long long u64_0 = ((unsigned long long*)pool)[base] ^ (*((unsigned long long*)&publicKey[0]));
+            unsigned long long u64_1 = ((unsigned long long*)pool)[base + 1] ^ (*((unsigned long long*)&publicKey[8]));
 
             if (m == 0)
             {
-                // some compiler doesn't work with bit shift 0
-                *((unsigned long long*) & output[i]) = lo;
+                // some compiler doesn't work with bit shift 64
+                *((unsigned long long*) & output[i]) = u64_0;
             }
             else
             {
-                *((unsigned long long*) & output[i]) = (lo >> m) | (hi << (64 - m));
+                *((unsigned long long*) & output[i]) = (u64_0 >> m) | (u64_1 << (64 - m));
             }
         }
         x = x * 1664525 + 1013904223; // https://en.wikipedia.org/wiki/Linear_congruential_generator#Parameters_in_common_use
     }
 }
 
-void random2(unsigned char* miningSeed, unsigned char* output, unsigned int outputSize) // outputSize must be a multiple of 8
+void randomizeMiningData(unsigned char* miningSeed, unsigned char* output, unsigned int outputSizeInByte) // outputSizeInByte must be a multiple of 8
 {
+    assert(outputSizeInByte % 8 == 0);
+
     unsigned char state[200];
     memcpy(&state[0], miningSeed, 32);
     memset(&state[32], 0, sizeof(state) - 32);
@@ -99,7 +104,7 @@ void random2(unsigned char* miningSeed, unsigned char* output, unsigned int outp
     }
 
     unsigned int x = 0; // The same sequence is always used, exploit this for optimization
-    for (unsigned long long i = 0; i < outputSize; i += 8)
+    for (unsigned long long i = 0; i < outputSizeInByte; i += 8)
     {
         *((unsigned long long*) & output[i]) = *((unsigned long long*) & pool[x & (1048576 - 1)]);
         x = x * 1664525 + 1013904223; // https://en.wikipedia.org/wiki/Linear_congruential_generator#Parameters_in_common_use
@@ -232,8 +237,7 @@ struct Miner
         memcpy(currentRandomSeed, miningSeed, sizeof(this->currentRandomSeed));
 
         // Init random2 pool with mining seed
-        generatePool(miningSeed, poolVec.data());
-
+        generateRandom2Pool(miningSeed, poolVec.data());
     }
 
     struct Synapse
@@ -792,10 +796,10 @@ struct Miner
         return R;
     }
 
-    void generateMiningData(unsigned char miningSeed[32])
+    void generateMiningData(unsigned char* miningSeed)
     {
         // Init the neuron input and expected output value
-        random2(miningSeed, (unsigned char*)&miningData, sizeof(miningData));
+        randomizeMiningData(miningSeed, (unsigned char*)&miningData, 32);
     }
 
     void initInputNeuron()
