@@ -363,13 +363,16 @@ struct Miner
     void removeNeuron(unsigned long long neuronIdx)
     {
         // Scan all its neigbor to remove their outgoing synapse point to the neuron
-        for (long long i = 0; i < numberOfNeighbors; ++i)
+        for (long long neighborOffset = -(long long)numberOfNeighbors / 2; neighborOffset <= (long long)numberOfNeighbors / 2; neighborOffset++)
         {
-            unsigned long long neigborNeuronIdx = getNeighborNeuronIndex(neuronIdx, i);
-            Synapse* pNNSynapses = getSynapses(neigborNeuronIdx);
+            unsigned long long nnIdx = clampNeuronIndex(neuronIdx, neighborOffset);
+            Synapse* pNNSynapses = getSynapses(nnIdx);
 
-            // Get the index of synapse point to current neuron and mark it as invalid synapse
-            long long synapseIndexOfNN = numberOfNeighbors - i;
+            long long synapseIndexOfNN = getIncomingSynapseIdx(neuronIdx, neighborOffset);
+            if (synapseIndexOfNN < 0)
+            {
+                continue;
+            }
 
             // The synapse array need to be shifted regard to the remove neuron
             // Also neuron need to have 2M neighbors, the addtional synapse will be set as zero weight
@@ -526,7 +529,7 @@ struct Miner
         // The change of synapse only impact neuron in [originalNeuronIdx - numberOfNeighbors / 2 + 1, originalNeuronIdx +  numberOfNeighbors / 2]
         // In the new index, it will be  [originalNeuronIdx + 1 - numberOfNeighbors / 2, originalNeuronIdx + 1 + numberOfNeighbors / 2]
         // [N0 N1 N2 original inserted N4 N5 N6], M = 2.
-        for (long long delta = -(long long)numberOfNeighbors / 2; delta <= numberOfNeighbors / 2; ++delta)
+        for (long long delta = -(long long)numberOfNeighbors / 2; delta <= (long long)numberOfNeighbors / 2; ++delta)
         {
             unsigned long long updatedNeuronIdx = clampNeuronIndex(insertedNeuronIdx, delta);
             Synapse* pUpdatedSynapses = getSynapses(updatedNeuronIdx);
@@ -542,9 +545,6 @@ struct Miner
                     insertedNeuronIdxInNeigborList = k;
                 }
             }
-
-            // Something is wrong here if we can not find the
-            assert(insertedNeuronIdxInNeigborList >= 0);
 
             // [N0 N1 N2 original inserted N4 N5 N6], M = 2.
             // Case: neurons in range [N0 N1 N2 original], right synapses will be affected
@@ -568,6 +568,26 @@ struct Miner
             }
 
         }
+    }
+
+    long long getIncomingSynapseIdx(unsigned long long neuronIdx, long long neighborOffset)
+    {
+        // Skip the case neuron point to itself and too far neighbor
+        if (neighborOffset == 0
+            || neighborOffset < -(long long)numberOfNeighbors / 2
+            || neighborOffset > (long long)numberOfNeighbors / 2)
+        {
+            return -1;
+        }
+
+        long long synapseIdx = (long long)numberOfNeighbors / 2 + neighborOffset;
+        if (neighborOffset >= 0)
+        {
+            synapseIdx = synapseIdx - 1;
+        }
+        synapseIdx = numberOfNeighbors - synapseIdx;
+
+        return synapseIdx;
     }
 
     // Check which neurons/synapse need to be removed after mutation
@@ -601,14 +621,18 @@ struct Miner
                 }
 
                 // Loop through the neighbor neurons to check all incoming synapses
-                for (unsigned long long n = 0; n <= numberOfNeighbors; n++)
+                for (long long neighborOffset = -(long long)numberOfNeighbors / 2; neighborOffset <= (long long)numberOfNeighbors / 2; neighborOffset++)
                 {
-                    if (n == numberOfNeighbors / 2)
+                    unsigned long long nnIdx = clampNeuronIndex(i, neighborOffset);
+                    Synapse* nnSynapses = getSynapses(nnIdx);
+
+                    long long synapseIdx = getIncomingSynapseIdx(i, neighborOffset);
+                    if (synapseIdx < 0)
                     {
                         continue;
                     }
-                    unsigned long long nnIdx = clampNeuronIndex(i + n, -(long long)numberOfNeighbors / 2);
-                    char synapseW = synapses[nnIdx * numberOfNeighbors].weight;
+                    char synapseW = nnSynapses[synapseIdx].weight;
+
                     if (synapseW != 0)
                     {
                         allIncommingZeros = false;
