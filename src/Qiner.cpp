@@ -207,14 +207,10 @@ struct Miner
     static_assert(populationThreshold > numberOfNeurons, "populationThreshold must be greater than numberOfNeurons");
     static_assert(numberOfNeurons > numberOfNeighbors, "Number of neurons must be greater than the number of neighbors");
 
-    unsigned char computorPublicKey[32];
-    unsigned char currentRandomSeed[32];
     std::vector<unsigned char> poolVec;
 
     void initialize(unsigned char miningSeed[32])
     {
-        memcpy(currentRandomSeed, miningSeed, sizeof(this->currentRandomSeed));
-
         // Init random2 pool with mining seed
         poolVec.resize(POOL_VEC_PADDING_SIZE);
         generateRandom2Pool(miningSeed, poolVec.data());
@@ -871,8 +867,6 @@ struct Miner
     // Main function for mining
     bool findSolution(unsigned char* publicKey, unsigned char* nonce)
     {
-        memcpy(computorPublicKey, publicKey, sizeof(computorPublicKey));
-
         // Initialize
         unsigned int bestR = initializeANN(publicKey, nonce);
 
