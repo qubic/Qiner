@@ -788,11 +788,11 @@ struct Miner
 
     unsigned int initializeANN(unsigned char* publicKey, unsigned char* nonce)
     {
-        unsigned char hashes[2][32];
+        unsigned char hash[32];
         unsigned char combined[64];
         memcpy(combined, publicKey, 32);
         memcpy(combined + 32, nonce, 32);
-        KangarooTwelve(combined, 64, &hashes[0][0], 64);
+        KangarooTwelve(combined, 64, hash, 32);
 
         unsigned long long& population = currentANN.population;
         Synapse* synapses = currentANN.synapses;
@@ -802,7 +802,7 @@ struct Miner
         population = numberOfNeurons;
 
         // Initalize with nonce and public key
-        random2(hashes[0], poolVec.data(), (unsigned char*)&initValue, sizeof(InitValue));
+        random2(hash, poolVec.data(), (unsigned char*)&initValue, sizeof(InitValue));
 
         // Randomly choose the positions of neurons types
         for (unsigned long long i = 0 ; i < population; ++i)
@@ -843,7 +843,7 @@ struct Miner
         }
 
         // Init the neuron input and expected output value
-        random2(hashes[1], poolVec.data(), (unsigned char*)&miningData, sizeof(miningData));
+        memcpy((unsigned char*)&miningData, poolVec.data(), sizeof(miningData));
 
         // Init input neuron value and output neuron
         initInputNeuron();
