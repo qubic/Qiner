@@ -486,6 +486,12 @@ struct Miner
                     // Updated synapse
                     pUpdatedSynapses[k] = pUpdatedSynapses[k - 1];
                 }
+
+                // Incomming synapse from original neuron -> inserted neuron must be zero
+                if (delta == -1)
+                {
+                    pUpdatedSynapses[insertedNeuronIdxInNeigborList].weight = 0;
+                }
             }
             else // Case: neurons in range [inserted N4 N5 N6], left synapses will be affected
             {
