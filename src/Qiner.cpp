@@ -788,7 +788,8 @@ struct Miner
                 neuronValue = -1;
             }
 
-            outputNeuronExpectedValue[i] = neuronValue;
+            // Convert value of neuron to trits (keeping 1 as 1, and changing 0 to -1.).
+            outputNeuronExpectedValue[i] = (neuronValue == 0) ? -1 : neuronValue;
         }
     }
 
