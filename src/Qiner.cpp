@@ -201,8 +201,10 @@ struct Miner
     static constexpr unsigned long long numberOfNeurons = numberOfInputNeurons + numberOfOutputNeurons;
     static constexpr unsigned long long maxNumberOfNeurons = populationThreshold;
     static constexpr unsigned long long maxNumberOfSynapses = populationThreshold * numberOfNeighbors;
+    static constexpr unsigned long long initNumberOfSynapses = numberOfNeurons * numberOfNeighbors;
 
     static_assert(maxNumberOfSynapses <= (0xFFFFFFFFFFFFFFFF << 1ULL), "maxNumberOfSynapses must less than or equal MAX_UINT64/2");
+    static_assert(initNumberOfSynapses % 32 == 0, "initNumberOfSynapses must be divided by 32");
     static_assert(numberOfNeighbors % 2 == 0, "numberOfNeighbors must divided by 2");
     static_assert(populationThreshold > numberOfNeurons, "populationThreshold must be greater than numberOfNeurons");
     static_assert(numberOfNeurons > numberOfNeighbors, "Number of neurons must be greater than the number of neighbors");
@@ -249,7 +251,7 @@ struct Miner
     struct InitValue
     {
         unsigned long long outputNeuronPositions[numberOfOutputNeurons];
-        unsigned long long synapseWeight[maxNumberOfSynapses];
+        unsigned long long synapseWeight[initNumberOfSynapses / 32]; // each 64bits elements will decide value of 32 synapses
         unsigned long long synpaseMutation[numberOfMutations];
     } initValue;
 
@@ -737,17 +739,11 @@ struct Miner
                 char neuronValue = 0;
                 unsigned char randomValue = miningData.inputNeuronRandomNumber[inputNeuronInitIndex];
                 inputNeuronInitIndex++;
-                if (randomValue % 3 == 0)
+                switch (randomValue & 3)
                 {
-                    neuronValue = 0;
-                }
-                else if (randomValue % 3 == 1)
-                {
-                    neuronValue = 1;
-                }
-                else
-                {
-                    neuronValue = -1;
+                    case 2: neuronValue = -1; break;
+                    case 3: neuronValue = 1; break;
+                    default: neuronValue = 0;
                 }
 
                 // Convert value of neuron to trits (keeping 1 as 1, and changing 0 to -1.).
@@ -775,17 +771,11 @@ struct Miner
         {
             char neuronValue = 0;
             unsigned char randomNumber = miningData.outputNeuronRandomNumber[i];
-            if (randomNumber % 3 == 0)
+            switch (randomNumber & 3)
             {
-                neuronValue = 0;
-            }
-            else if (randomNumber % 3 == 1)
-            {
-                neuronValue = 1;
-            }
-            else
-            {
-                neuronValue = -1;
+                case 2: neuronValue = -1; break;
+                case 3: neuronValue = 1; break;
+                default: neuronValue = 0;
             }
 
             // Convert value of neuron to trits (keeping 1 as 1, and changing 0 to -1.).
@@ -832,20 +822,23 @@ struct Miner
         }
 
         // Synapse weight initialization
-        const unsigned long long initNumberOfSynapses = population * numberOfNeighbors;
-        for (unsigned long long i = 0 ; i < initNumberOfSynapses; ++i)
+        for (unsigned long long i = 0 ; i < (initNumberOfSynapses / 32); ++i)
         {
-            if (initValue.synapseWeight[i] % 3 == 0)
+            const unsigned long long mask = 3ULL;
+
+            for (int j = 0; j < 32; ++j)
             {
-                synapses[i].weight = 0;
-            }
-            else if (initValue.synapseWeight[i] % 3 == 1)
-            {
-                synapses[i].weight = 1;
-            }
-            else if (initValue.synapseWeight[i] % 3 == 2)
-            {
-                synapses[i].weight = -1;
+                int shiftVal = j * 2;
+                unsigned char extractValue = (unsigned char)((initValue.synapseWeight[i] >> shiftVal) & mask);
+                char synapseWeight = 0;
+
+                switch (extractValue & 3)
+                {
+                    case 2: synapseWeight = -1; break;
+                    case 3: synapseWeight = 1; break;
+                    default: synapseWeight = 0;
+                }
+                synapses[32 * i + j].weight = synapseWeight;
             }
         }
 
