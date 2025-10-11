@@ -170,21 +170,34 @@ static constexpr unsigned long long NUMBER_OF_MUTATIONS = 100;
 static constexpr unsigned long long POPULATION_THRESHOLD = NUMBER_OF_INPUT_NEURONS + NUMBER_OF_OUTPUT_NEURONS + NUMBER_OF_MUTATIONS; // P
 static constexpr unsigned int SOLUTION_THRESHOLD = NUMBER_OF_OUTPUT_NEURONS * 4 / 5;
 
+// Compute threshold for clamp
+template <typename T>
+void computeNeuronValueThreshold(T N, T *L_out, T *R_out) 
+{
+    static_assert(std::is_integral_v<T>, "T must be an integer type");
+
+    T numberOfValues = 2 * N + 1;
+    T a = (numberOfValues + 2) / 3; // divup
+    *L_out = -N + a;
+    *R_out = N - a;
+}
 
 // Clamp the neuron value
 template <typename T>
-T clampNeuron(T neuronValue)
+T clampNeuron(T neuronValue, T left, T right)
 {
-    if (neuronValue > 1)
+    static_assert(std::is_integral_v<T>, "T must be an integer type");
+
+    if (neuronValue > right)
     {
         return 1;
     }
 
-    if (neuronValue < -1)
+    if (neuronValue < left)
     {
         return -1;
     }
-    return neuronValue;
+    return 0;
 }
 
 void extract64Bits(unsigned long long number, char* output)
@@ -246,6 +259,8 @@ struct Miner
         Type type;
         char value;
         bool markForRemoval;
+        long long clampLeftBoundary;
+        long long clampRightBoundary;
     };
 
     // Data for roll back
@@ -279,6 +294,7 @@ struct Miner
     char outputNeuronExpectedValue[numberOfOutputNeurons];
 
     long long neuronValueBuffer[maxNumberOfNeurons];
+    long long numberOfNonZeroInputSynapse[maxNumberOfNeurons];
 
     void mutate(unsigned char nonce[32], int mutateStep)
     {
@@ -655,11 +671,15 @@ struct Miner
             }
         }
 
-        // Clamp the neuron value
+        // Clamp the neuron value and update
         for (long long n = 0; n < population; ++n)
         {
-            long long neuronValue = clampNeuron(neuronValueBuffer[n]);
-            neurons[n].value = neuronValue;
+            // Skip updating input neuron
+            if (neurons[n].type != Neuron::kInput)
+            {
+                long long neuronValue = clampNeuron(neuronValueBuffer[n], neurons[n].clampLeftBoundary, neurons[n].clampRightBoundary);
+                neurons[n].value = neuronValue;
+            }
         }
     }
 
@@ -674,6 +694,44 @@ struct Miner
         {
             // Backup the neuron value
             previousNeuronValue[i] = neurons[i].value;
+        }
+
+        // Compute the clamp threshold
+        // Loop though all neurons to find number of non-zero input synapses of neurons
+        memset(numberOfNonZeroInputSynapse, 0, sizeof(numberOfNonZeroInputSynapse));
+        for (long long n = 0; n < population; ++n)
+        {
+            const Synapse* kSynapses = getSynapses(n);
+            // Scan through all neighbor neurons and sum all connected neurons.
+            // The synapses are arranged as neuronIndex * numberOfNeighbors
+            for (long long m = 0; m < numberOfNeighbors; m++)
+            {
+                char synapseWeight = kSynapses[m].weight;
+                unsigned long long nnIndex = 0 ;
+                if ( m < numberOfNeighbors / 2)
+                {
+                    nnIndex = clampNeuronIndex(n + m, -(long long)numberOfNeighbors / 2);
+                }
+                else
+                {
+                    nnIndex = clampNeuronIndex(n + m + 1, -(long long)numberOfNeighbors / 2);
+                }
+
+                if (synapseWeight != 0)
+                {
+                    numberOfNonZeroInputSynapse[nnIndex]++;
+                }
+            }
+        }
+        
+        for (long long n = 0; n < population; ++n)
+        {
+            neurons[n].clampLeftBoundary = 0;
+            neurons[n].clampRightBoundary = 0;
+            if (Neuron::kInput != neurons[n].type)
+            {
+                computeNeuronValueThreshold(numberOfNonZeroInputSynapse[n], &neurons[n].clampLeftBoundary, &neurons[n].clampRightBoundary);
+            }
         }
 
         for(unsigned long long tick = 0; tick < numberOfTicks; ++tick)
