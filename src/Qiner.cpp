@@ -328,7 +328,9 @@ struct Miner
         return &currentANN.synapses[neuronIndex * numberOfNeighbors];
     }
 
-    // Circulate the neuron index
+    // Calculate the new neuron index that is reached by moving from the given `neuronIdx` `value` neurons to the right or left.
+    // Negative `value` moves to the left, positive `value` moves to the right. The return value is clamped in a ring buffer fashion,
+    // i.e. moving right of the rightmost neuron continues at the leftmost neuron.
     unsigned long long clampNeuronIndex(long long neuronIdx, long long value)
     {
         unsigned long long population = currentANN.population;
@@ -445,20 +447,25 @@ struct Miner
             pInsertNeuronSynapse[synIdx].weight = 0;
         }
 
-        // Copy the outgoing synapse of original neuron
-        // Outgoing points to the left
+        // Copy the outgoing synapse of original neuron 
         if (incomingNeighborSynapseIdx < numberOfNeighbors / 2)
         {
+            // The synapse is going to a neuron to the left of the original neuron.
+            // Check if the incoming neuron is still contained in the neighbors of the inserted neuron.
+            // This is the case if the original `incomingNeighborSynapseIdx` is > 0,
+            // i.e. the original synapse if not going to the leftmost neighbor of the original neuron.
             if (incomingNeighborSynapseIdx > 0)
             {
-                // Decrease by one because the new neuron is next to the original one
+                // Decrease idx by one because the new neuron is inserted directly to the right of the original one.
                 pInsertNeuronSynapse[incomingNeighborSynapseIdx - 1].weight = originalWeight;
             }
-            // Incase of the outgoing synapse point too far, don't add the synapse
+            // If the incoming neuron of the original synapse if not contained in the neighbors of the inserted neuron, don't add the synapse.
         }
         else
         {
-            // No need to adjust the added neuron but need to remove the synapse of the original neuron
+            // The synapse is going to a neuron to the right of the original neuron.
+            // In this case, the incoming neuron of the synapse is for sure contained in the neighbors of the inserted neuron
+            // and has the same idx (right side neighbors of inserted neuron = right side neighbors of original neuron before insertion).
             pInsertNeuronSynapse[incomingNeighborSynapseIdx].weight = originalWeight;
         }
 
