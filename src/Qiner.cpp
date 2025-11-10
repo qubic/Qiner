@@ -162,11 +162,11 @@ typedef struct
 
 char* nodeIp = NULL;
 int nodePort = 0;
-static constexpr unsigned long long NUMBER_OF_INPUT_NEURONS = 256;     // K
-static constexpr unsigned long long NUMBER_OF_OUTPUT_NEURONS = 256;    // L
-static constexpr unsigned long long NUMBER_OF_TICKS = 120;               // N
-static constexpr unsigned long long MAX_NEIGHBOR_NEURONS = 256; // 2M. Must divided by 2
-static constexpr unsigned long long NUMBER_OF_MUTATIONS = 100;
+static constexpr unsigned long long NUMBER_OF_INPUT_NEURONS = 8;     // K
+static constexpr unsigned long long NUMBER_OF_OUTPUT_NEURONS = 8;    // L
+static constexpr unsigned long long NUMBER_OF_TICKS = 10;               // N
+static constexpr unsigned long long MAX_NEIGHBOR_NEURONS = 8; // 2M. Must divided by 2
+static constexpr unsigned long long NUMBER_OF_MUTATIONS = 10;
 static constexpr unsigned long long POPULATION_THRESHOLD = NUMBER_OF_INPUT_NEURONS + NUMBER_OF_OUTPUT_NEURONS + NUMBER_OF_MUTATIONS; // P
 static constexpr unsigned int SOLUTION_THRESHOLD = NUMBER_OF_OUTPUT_NEURONS * 4 / 5;
 
@@ -225,8 +225,8 @@ struct Miner
     static constexpr unsigned long long maxNumberOfSynapses = populationThreshold * numberOfNeighbors;
     static constexpr unsigned long long initNumberOfSynapses = numberOfNeurons * numberOfNeighbors;
 
-    static_assert(numberOfInputNeurons % 64 == 0, "numberOfInputNeurons must be divided by 64");
-    static_assert(numberOfOutputNeurons % 64 == 0, "numberOfOutputNeurons must be divided by 64");
+    //static_assert(numberOfInputNeurons % 64 == 0, "numberOfInputNeurons must be divided by 64");
+    //static_assert(numberOfOutputNeurons % 64 == 0, "numberOfOutputNeurons must be divided by 64");
     static_assert(maxNumberOfSynapses <= (0xFFFFFFFFFFFFFFFF << 1ULL), "maxNumberOfSynapses must less than or equal MAX_UINT64/2");
     static_assert(initNumberOfSynapses % 32 == 0, "initNumberOfSynapses must be divided by 32");
     static_assert(numberOfNeighbors % 2 == 0, "numberOfNeighbors must divided by 2");
@@ -283,8 +283,8 @@ struct Miner
 
     struct MiningData
     {
-        unsigned long long inputNeuronRandomNumber[numberOfInputNeurons / 64 ];  // each bit will use for generate input neuron value
-        unsigned long long outputNeuronRandomNumber[numberOfOutputNeurons / 64]; // each bit will use for generate expected output neuron value
+        unsigned long long inputNeuronRandomNumber[numberOfInputNeurons >= 64 ? numberOfInputNeurons / 64 : 1];  // each bit will use for generate input neuron value
+        unsigned long long outputNeuronRandomNumber[numberOfOutputNeurons >= 64 ? numberOfOutputNeurons / 64 : 1]; // each bit will use for generate expected output neuron value
     } miningData;
 
     unsigned long long neuronIndices[numberOfNeurons];
@@ -930,7 +930,7 @@ struct Miner
     }
 
     // Main function for mining
-    bool findSolution(unsigned char* publicKey, unsigned char* nonce)
+    unsigned int findSolution(unsigned char* publicKey, unsigned char* nonce)
     {
         // Initialize
         unsigned int bestR = initializeANN(publicKey, nonce);
@@ -969,13 +969,26 @@ struct Miner
         }
 
         // Check score
-        unsigned int score = numberOfOutputNeurons - bestR;
-        if (score >= solutionThreshold)
-        {
-            return true;
-        }
+        //unsigned int score = numberOfOutputNeurons - bestR;
+        //if (score >= solutionThreshold)
+        //{
+        //    return true;
+        //}
 
-        return false;
+        unsigned int avgNonZeroNeuronValue = 0;
+        for (unsigned long long i = 0; i < bestANN.population; i++)
+        {
+            if (bestANN.neurons[i].type == Neuron::kOutput)
+            {
+                if (bestANN.neurons[i].value != 0)
+                {
+                    avgNonZeroNeuronValue++;
+                }
+            }
+        }
+        //if (avgNonZeroNeuronValue )
+
+        return avgNonZeroNeuronValue;
     }
 };
 
@@ -1048,6 +1061,18 @@ bool isZeros(const unsigned char* value)
 }
 typedef Miner<NUMBER_OF_INPUT_NEURONS, NUMBER_OF_OUTPUT_NEURONS, NUMBER_OF_TICKS, MAX_NEIGHBOR_NEURONS, POPULATION_THRESHOLD, NUMBER_OF_MUTATIONS, SOLUTION_THRESHOLD> ActiveMiner;
 
+static std::string byteToHex(const unsigned char* byteArray, size_t sizeInByte)
+{
+    std::ostringstream oss;
+    for (size_t i = 0; i < sizeInByte; ++i)
+    {
+        oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byteArray[i]);
+    }
+    return oss.str();
+
+}
+#include <iostream>
+
 int miningThreadProc()
 {
     std::unique_ptr<ActiveMiner> miner(new ActiveMiner());
@@ -1061,11 +1086,16 @@ int miningThreadProc()
         _rdrand64_step((unsigned long long*)&nonce.data()[16]);
         _rdrand64_step((unsigned long long*)&nonce.data()[24]);
 
-        if (miner->findSolution(computorPublicKey, nonce.data()))
+        unsigned int nonZeroOutputCount = miner->findSolution(computorPublicKey, nonce.data());
+        if (nonZeroOutputCount >= 7)
         {
             {
                 std::lock_guard<std::mutex> guard(foundNonceLock);
                 foundNonce.push(nonce);
+                std::cout << "nonZeroOutputCount " << nonZeroOutputCount << ", ";
+                std::cout << "seed " << byteToHex(randomSeed, 32) << ", ";
+                std::cout << "publickey " << byteToHex(computorPublicKey, 32) << ", ";
+                std::cout << "nonce " << byteToHex(nonce.data(), 32) << "\n";
             }
             numberOfFoundSolutions++;
         }
