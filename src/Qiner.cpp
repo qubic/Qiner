@@ -336,16 +336,21 @@ static void hexToByte(const char* hex, uint8_t* byte, const int sizeInByte)
 
 int main(int argc, char* argv[])
 {
-    std::vector<std::thread> miningThreads;
-    if (argc != 7)
+    if (argc < 7)
     {
-        printf("Usage:   Qiner [Node IP] [Node Port] [MiningID] [Signing Seed] [Mining Seed] [Nonces]\n");
+        printf("Usage:  broadcastMessageSolution [Node IP] [Node Port] [MiningID] [Signing Seed] [Mining Seed] [Nonces] [Algo ID (Optional)]\n");
     }
     else
     {
         nodeIp = argv[1];
         nodePort = std::atoi(argv[2]);
         char* miningID = argv[3];
+
+        int selectedAlgoId = -1;
+        if (argc > 7)
+        {
+            selectedAlgoId = std::atoi(argv[7]);
+        }
 
         consoleCtrlHandler();
 
@@ -367,6 +372,21 @@ int main(int argc, char* argv[])
             unsigned char nonce[32];
             hexToByte(argv[5], randomSeed, 32);
             hexToByte(argv[6], nonce, 32);
+
+            // Adjust the nonce if user request
+            if (selectedAlgoId >=0 )
+            {
+                // Hyperidentity scoring
+                if (selectedAlgoId == 0)
+                {
+                    nonce[0] &= 0xFE;
+                }
+                // Addition scoring
+                else if (selectedAlgoId == 1)
+                {
+                    nonce[0] |= 0x1;
+                }
+            }
 
             struct
             {
