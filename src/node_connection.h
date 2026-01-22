@@ -209,9 +209,6 @@ struct SolutionSubmitter
         _nodePort = nodePort;
         _nodeIp = address;
         memcpy(_miningSeed, miningSeed, sizeof(_miningSeed));
-        memset(_privateKeyQubicFormat, 0, sizeof(_privateKeyQubicFormat));
-        memset(_publicKeyQubicFormat, 0, sizeof(_publicKeyQubicFormat));
-        memset(_publicIdentity, 0, sizeof(_publicIdentity));
 
         // Set data for submission
         getSubseedFromSeed((unsigned char*)signingSeed, _signingSubseed);
