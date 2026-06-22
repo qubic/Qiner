@@ -47,6 +47,48 @@ struct Miner
     // Undecided trit (the third value); the two decided states are 0 and 1.
     static constexpr unsigned char TRIT_UNKNOWN = 2;
 
+    // Error counts of one evaluation: FALSE = decided wrong, UNKNOWN = output left at trit 2.
+    struct Score
+    {
+        unsigned int numberOfFalses;
+        unsigned int numberOfUnknowns;
+    };
+
+    // Compare two error scores: returns 1 if (1) is worse, -1 if better, 0 if equal.
+    // Primary key: total errors (fewer better). Tie-break: fewer FALSEs better.
+    static int compare(unsigned int numberOfFalses1, unsigned int numberOfUnknowns1, unsigned int numberOfFalses2, unsigned int numberOfUnknowns2)
+    {
+        if (numberOfFalses1 + numberOfUnknowns1 == numberOfFalses2 + numberOfUnknowns2)
+        {
+            if (numberOfFalses1 == numberOfFalses2)
+            {
+                return 0;
+            }
+            else
+            {
+                if (numberOfFalses1 > numberOfFalses2)
+                {
+                    return 1;
+                }
+                else
+                {
+                    return -1;
+                }
+            }
+        }
+        else
+        {
+            if (numberOfFalses1 + numberOfUnknowns1 > numberOfFalses2 + numberOfUnknowns2)
+            {
+                return 1;
+            }
+            else
+            {
+                return -1;
+            }
+        }
+    }
+
     // 3^maxNumberOfNeighbors lines per LUT (one output trit per neighbour-trit combination).
     static constexpr unsigned long long ipow(unsigned long long base, unsigned long long exp)
     {
@@ -278,26 +320,30 @@ struct Miner
         }
     }
 
-    unsigned int computeMatchingOutput()
+    // Count the output errors of the current ANN, FALSE (decided wrong) and UNKNOWN (undecided).
+    void countOutputErrors(Score& score)
     {
         unsigned long long population = currentANN.population;
         Neuron* neurons = currentANN.neurons;
 
-        // Output neurons are matched in index-scan order against the expected trits.
-        unsigned int R = 0;
         unsigned long long outputIdx = 0;
         for (unsigned long long i = 0; i < population; i++)
         {
             if (neurons[i].type == Neuron::kOutput)
             {
-                if (neurons[i].value == outputNeuronExpectedValue[outputIdx])
+                const unsigned char t = neurons[i].value;
+                const unsigned char e = outputNeuronExpectedValue[outputIdx];
+                if (t == TRIT_UNKNOWN)
                 {
-                    R++;
+                    score.numberOfUnknowns++;
+                }
+                else if (t != e)
+                {
+                    score.numberOfFalses++;
                 }
                 outputIdx++;
             }
         }
-        return R;
     }
 
     // Generate all 2^K possible (A, B, C) pairs
@@ -320,17 +366,16 @@ struct Miner
         }
     }
 
-    unsigned int inferANN()
+    // Run the ANN over the whole training set and return its error counts.
+    Score inferANN()
     {
-        unsigned int score = 0;
+        Score score;
+        score.numberOfFalses = 0;
+        score.numberOfUnknowns = 0;
         for (unsigned long long i = 0; i < trainingSetSize; ++i)
         {
-            // Ticks simulation
             runTickSimulation(i);
-
-            // Compute R
-            unsigned int R = computeMatchingOutput();
-            score += R;
+            countOutputErrors(score);
         }
         return score;
     }
@@ -353,7 +398,7 @@ struct Miner
         currentANN.lut[neuronIdx][line] = newTrit;
     }
 
-    unsigned int initializeANN(unsigned char* publicKey, unsigned char* nonce)
+    Score initializeANN(unsigned char* publicKey, unsigned char* nonce)
     {
         unsigned char hash[32];
         unsigned char combined[64];
@@ -429,10 +474,8 @@ struct Miner
             }
         }
 
-        // Run the first inference to get starting point before mutation
-        unsigned int score = inferANN();
-
-        return score;
+        // Error counts of the starting ANN.
+        return inferANN();
     }
 
     // Main mining function: N mutation steps with the anti-attractor split
@@ -454,9 +497,9 @@ struct Miner
             K = numberOfMutations;
         }
 
-        unsigned int curR = initializeANN(publicKey, nonce);
+        Score cur = initializeANN(publicKey, nonce);
         memcpy(&bestANN, &currentANN, sizeof(bestANN));
-        unsigned int bestR = curR;
+        Score best = cur;
 
         for (unsigned long long s = 0; s < numberOfMutations; ++s)
         {
@@ -469,23 +512,24 @@ struct Miner
                 mutate(initValue.mutationSeed[s * MAX_LUT_ENTRIES_PER_STEP + i]);
             }
 
-            const unsigned int r = inferANN();
+            const Score r = inferANN();
+            const int c = compare(r.numberOfFalses, r.numberOfUnknowns, cur.numberOfFalses, cur.numberOfUnknowns);
 
             bool accept = false;
             if (s < K)
             {
                 // First K steps, keep the mutation if it made the score worse.
-                accept = (r <= curR);
+                accept = (c >= 0);
             }
             else
             {
                 // Then, keep the mutation if it made the score better.
-                accept = (r >= curR);
+                accept = (c <= 0);
             }
 
             if (accept)
             {
-                curR = r;
+                cur = r;
             }
             else
             {
@@ -493,19 +537,19 @@ struct Miner
                 memcpy(&currentANN, &prevANN, sizeof(currentANN));
             }
 
-            if (curR > bestR)
+            if (compare(cur.numberOfFalses, cur.numberOfUnknowns, best.numberOfFalses, best.numberOfUnknowns) < 0)
             {
-                bestR = curR;
+                best = cur;
                 memcpy(&bestANN, &currentANN, sizeof(bestANN));
             }
         }
-        return bestR;
+        return best.numberOfFalses + best.numberOfUnknowns;
     }
 
     bool findSolution(unsigned char* publicKey, unsigned char* nonce)
     {
-        unsigned int score = computeScore(publicKey, nonce);
-        if (score >= solutionThreshold)
+        unsigned int totalErrors = computeScore(publicKey, nonce);
+        if (totalErrors <= solutionThreshold)
         {
             return true;
         }
