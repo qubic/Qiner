@@ -89,18 +89,12 @@ struct Miner
         }
     }
 
-    // 3^maxNumberOfNeighbors lines per LUT (one output trit per neighbour-trit combination).
-    static constexpr unsigned long long ipow(unsigned long long base, unsigned long long exp)
-    {
-        unsigned long long result = 1;
-        for (unsigned long long i = 0; i < exp; ++i)
-        {
-            result *= base;
-        }
-        return result;
-    }
-    static constexpr unsigned long long lutSize = ipow(3, maxNumberOfNeighbors);
+    // 3 trit inputs, 3^3 = 27 lines per LUT (one output trit per neighbour-trit combination).
+    static constexpr unsigned long long lutSize = 27;
 
+    static_assert(
+        maxNumberOfNeighbors == 3,
+        "the LUT index is hardcoded for 3 neighbours");
     static_assert(
         populationThreshold > numberOfNeurons,
         "populationThreshold must be greater than numberOfNeurons");
@@ -226,16 +220,11 @@ struct Miner
                 continue;
             }
 
-            // Base-3 index over the neighbours: index = sum(neighbourTrit_k * 3^k).
-            unsigned long long index = 0;
-            unsigned long long place = 1;
-            for (unsigned long long k = 0; k < maxNumberOfNeighbors; ++k)
-            {
-                unsigned long long nnIndex = getSourceNeuron(n, k);
-                index += (unsigned long long)neurons[nnIndex].value * place;
-                place *= 3;
-            }
-            nextNeuronValue[n] = currentANN.lut[n][index];
+            // Base-3 index over the three neighbour trits, index = t0 + 3*t1 + 9*t2.
+            const unsigned long long t0 = neurons[getSourceNeuron(n, 0)].value;
+            const unsigned long long t1 = neurons[getSourceNeuron(n, 1)].value;
+            const unsigned long long t2 = neurons[getSourceNeuron(n, 2)].value;
+            nextNeuronValue[n] = currentANN.lut[n][t0 + 3 * t1 + 9 * t2];
         }
 
         // Commit the new values
