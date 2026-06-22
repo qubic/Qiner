@@ -24,6 +24,8 @@ static constexpr long long NEIGHBOR_OFFSETS[] = { 1, 4, 13 };
 static constexpr unsigned long long MAX_NEIGHBOR_NEURONS =
     sizeof(NEIGHBOR_OFFSETS) / sizeof(NEIGHBOR_OFFSETS[0]);
 static constexpr unsigned int SOLUTION_THRESHOLD = ((1ULL << NUMBER_OF_INPUT_NEURONS) * NUMBER_OF_OUTPUT_NEURONS * 4 / 5);
+// Max LUT entries one mutation step may use (miner-chosen L)
+static constexpr unsigned int MAX_LUT_ENTRIES_PER_STEP = 10;
 
 template <
     unsigned long long numberOfInputNeurons,  // K
@@ -105,13 +107,15 @@ struct Miner
     };
     ANN bestANN;
     ANN currentANN;
+    // Snapshot for the one-step rollback in the anti-attractor walk.
+    ANN prevANN;
 
     struct InitValue
     {
         unsigned long long outputNeuronPositions[numberOfOutputNeurons];
         unsigned long long evolutionNeuronPositions[numberOfEvolutionNeurons];
         unsigned char lutInit[maxNumberOfNeurons * lutSize]; // one byte per LUT line, taken mod 3
-        unsigned long long mutationSeed[numberOfMutations];
+        unsigned long long mutationSeed[numberOfMutations * MAX_LUT_ENTRIES_PER_STEP];
     } initValue;
 
     unsigned long long neuronIndices[maxNumberOfNeurons];
@@ -355,6 +359,10 @@ struct Miner
         unsigned char combined[64];
         memcpy(combined, publicKey, 32);
         memcpy(combined + 32, nonce, 32);
+        // K, L and the algo bit live in nonce[0..2], exclude them from the RNG
+        combined[32] = 0;
+        combined[33] = 0;
+        combined[34] = 0;
         KangarooTwelve(combined, 64, hash, 32);
 
         unsigned long long& population = currentANN.population;
@@ -427,31 +435,68 @@ struct Miner
         return score;
     }
 
-    // Main function for mining
+    // Main mining function: N mutation steps with the anti-attractor split
     unsigned int computeScore(unsigned char* publicKey, unsigned char* nonce)
     {
-        // Initialize
-        unsigned int bestR = initializeANN(publicKey, nonce);
+        // Miner knobs from nonce[1..2], do not affect the RNG.
+        unsigned int L = nonce[1];
+        if (L < 1)
+        {
+            L = 1;
+        }
+        if (L > MAX_LUT_ENTRIES_PER_STEP)
+        {
+            L = MAX_LUT_ENTRIES_PER_STEP;
+        }
+        unsigned long long K = nonce[2];
+        if (K > numberOfMutations)
+        {
+            K = numberOfMutations;
+        }
+
+        unsigned int curR = initializeANN(publicKey, nonce);
         memcpy(&bestANN, &currentANN, sizeof(bestANN));
+        unsigned int bestR = curR;
 
         for (unsigned long long s = 0; s < numberOfMutations; ++s)
         {
-            mutate(initValue.mutationSeed[s]);
+            // Snapshot for the one-step rollback.
+            memcpy(&prevANN, &currentANN, sizeof(prevANN));
 
-            // Ticks simulation
-            unsigned int R = inferANN();
-
-            // Roll back if neccessary
-            if (R >= bestR)
+            // Apply L LUT-entry mutations from this step's fixed seed slot.
+            for (unsigned int i = 0; i < L; ++i)
             {
-                bestR = R;
-                // Better R. Save the state
-                memcpy(&bestANN, &currentANN, sizeof(bestANN));
+                mutate(initValue.mutationSeed[s * MAX_LUT_ENTRIES_PER_STEP + i]);
+            }
+
+            const unsigned int r = inferANN();
+
+            bool accept = false;
+            if (s < K)
+            {
+                // First K steps, keep the mutation if it made the score worse.
+                accept = (r <= curR);
             }
             else
             {
-                // Roll back
-                memcpy(&currentANN, &bestANN, sizeof(bestANN));
+                // Then, keep the mutation if it made the score better.
+                accept = (r >= curR);
+            }
+
+            if (accept)
+            {
+                curR = r;
+            }
+            else
+            {
+                // Roll back one step (to the previous position, NOT to the best).
+                memcpy(&currentANN, &prevANN, sizeof(currentANN));
+            }
+
+            if (curR > bestR)
+            {
+                bestR = curR;
+                memcpy(&bestANN, &currentANN, sizeof(bestANN));
             }
         }
         return bestR;
