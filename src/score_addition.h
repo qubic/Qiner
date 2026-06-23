@@ -98,6 +98,9 @@ struct Miner
         poolVec.resize(POOL_VEC_PADDING_SIZE);
         generateRandom2Pool(miningSeed, poolVec.data());
 
+        // Fixed neighbour wiring, computed once.
+        computeSourceNeurons();
+
         // Generate the full sample, then select the subset from the Spectrum Digest.
         generateFullTrainingSet();
         setEpochStartSpectrumDigest(epochStartSpectrumDigest);
@@ -178,6 +181,9 @@ struct Miner
     unsigned char previousNeuronValue[maxNumberOfNeurons];
     unsigned char nextNeuronValue[maxNumberOfNeurons];
 
+    // Fixed neighbour, source neuron index for each (neuron, slot)
+    unsigned long long sourceNeuron[maxNumberOfNeurons][maxNumberOfNeighbors];
+
     unsigned long long outputNeuronIndices[numberOfOutputNeurons];
     unsigned char outputNeuronExpectedValue[numberOfOutputNeurons];
 
@@ -186,7 +192,7 @@ struct Miner
     unsigned long long updatedNeuronIndices[maxNumberOfNeurons];
     unsigned long long numberOfUpdatedNeurons;
 
-    // Map a bipolar training bit to a trit. The two decided states map to 0 and, the neutral  maps to UNKNOWN.
+    // Map a bipolar training bit to a trit. The two decided states map to 0 and, the neutral maps to UNKNOWN.
     static unsigned char bipolarToTrit(char val)
     {
         if (val < 0)
@@ -200,30 +206,26 @@ struct Miner
         return TRIT_UNKNOWN;
     }
 
-    // Calculate the new neuron index reached by moving `value` neurons along the ring (wraps).
-    unsigned long long clampNeuronIndex(long long neuronIdx, long long value)
+    // Precompute the fixed neighbour wiring: source neuron index for each (neuron, slot)
+    void computeSourceNeurons()
     {
-        unsigned long long population = currentANN.population;
-        assert(value > -(long long)population && value < (long long)population
-           && "clampNeuronIndex: |value| must be less than population");
-
-        long long nnIndex = 0;
-        if (value >= 0)
+        for (unsigned long long n = 0; n < populationThreshold; ++n)
         {
-            nnIndex = neuronIdx + value;
+            for (unsigned long long k = 0; k < maxNumberOfNeighbors; ++k)
+            {
+                const long long value = NEIGHBOR_OFFSETS[k];
+                long long nnIndex = 0;
+                if (value >= 0)
+                {
+                    nnIndex = (long long)n + value;
+                }
+                else
+                {
+                    nnIndex = (long long)n + (long long)populationThreshold + value;
+                }
+                sourceNeuron[n][k] = (unsigned long long)(nnIndex % (long long)populationThreshold);
+            }
         }
-        else
-        {
-            nnIndex = neuronIdx + population + value;
-        }
-        nnIndex = nnIndex % population;
-        return (unsigned long long)nnIndex;
-    }
-
-    // Get neighbor index
-    unsigned long long getSourceNeuron(unsigned long long neuronIdx, unsigned long long sourceSlot)
-    {
-        return clampNeuronIndex((long long)neuronIdx, NEIGHBOR_OFFSETS[sourceSlot]);
     }
 
     // Inference step, every non-input neuron looks up its next trit from the trits of its neighbours
@@ -241,9 +243,9 @@ struct Miner
             }
 
             // Base-3 index over the three neighbour trits, index = t0 + 3*t1 + 9*t2.
-            const unsigned long long t0 = neurons[getSourceNeuron(n, 0)].value;
-            const unsigned long long t1 = neurons[getSourceNeuron(n, 1)].value;
-            const unsigned long long t2 = neurons[getSourceNeuron(n, 2)].value;
+            const unsigned long long t0 = neurons[sourceNeuron[n][0]].value;
+            const unsigned long long t1 = neurons[sourceNeuron[n][1]].value;
+            const unsigned long long t2 = neurons[sourceNeuron[n][2]].value;
             nextNeuronValue[n] = currentANN.lut[n][t0 + 3 * t1 + 9 * t2];
         }
 
