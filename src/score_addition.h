@@ -18,9 +18,9 @@ static constexpr unsigned long long NUMBER_OF_INPUT_NEURONS = 2 * 7; // K
 static constexpr unsigned long long NUMBER_OF_OUTPUT_NEURONS = 8;    // L
 static constexpr unsigned long long NUMBER_OF_TICKS = 120;
 static constexpr unsigned long long NUMBER_OF_MUTATIONS = 100;
-static constexpr unsigned long long POPULATION_THRESHOLD = 32;       // P
+static constexpr unsigned long long POPULATION_THRESHOLD = 256;      // P
 // The neighbour offsets that feed every neuron's LUT, in LUT-index order
-static constexpr long long NEIGHBOR_OFFSETS[] = { 1, 4, 13 };
+static constexpr long long NEIGHBOR_OFFSETS[] = { 1, 5, 47 };
 static constexpr unsigned long long MAX_NEIGHBOR_NEURONS =
     sizeof(NEIGHBOR_OFFSETS) / sizeof(NEIGHBOR_OFFSETS[0]);
 static constexpr unsigned int SOLUTION_THRESHOLD = ((1ULL << NUMBER_OF_INPUT_NEURONS) * NUMBER_OF_OUTPUT_NEURONS * 4 / 5);
