@@ -178,7 +178,6 @@ struct Miner
     } initValue;
 
     unsigned long long neuronIndices[maxNumberOfNeurons];
-    unsigned char previousNeuronValue[maxNumberOfNeurons];
     unsigned char nextNeuronValue[maxNumberOfNeurons];
 
     // Fixed neighbour, source neuron index for each (neuron, slot)
@@ -293,40 +292,22 @@ struct Miner
 
         loadTrainingData(trainingIndex);
 
-        for (unsigned long long i = 0; i < population; ++i)
-        {
-            previousNeuronValue[i] = neurons[i].value;
-        }
-
         for (unsigned long long tick = 0; tick < numberOfTicks; ++tick)
         {
             processTick();
-            // Exit conditions:
-            // - N ticks have passed (already in for loop)
-            // - All neuron values are unchanged
-            // - All output neurons are decided (left the UNKNOWN trit)
-            bool allNeuronsUnchanged = true;
+            // Exit early once every output neuron is decided (left the UNKNOWN trit).
             bool allOutputsDecided = true;
             for (unsigned long long n = 0; n < population; ++n)
             {
-                if (previousNeuronValue[n] != neurons[n].value)
-                {
-                    allNeuronsUnchanged = false;
-                }
                 if (neurons[n].type == Neuron::kOutput && neurons[n].value == TRIT_UNKNOWN)
                 {
                     allOutputsDecided = false;
                 }
             }
 
-            if (allOutputsDecided || allNeuronsUnchanged)
+            if (allOutputsDecided)
             {
                 break;
-            }
-
-            for (unsigned long long n = 0; n < population; ++n)
-            {
-                previousNeuronValue[n] = neurons[n].value;
             }
         }
     }
