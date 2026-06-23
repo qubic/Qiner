@@ -54,39 +54,21 @@ struct Miner
         unsigned int numberOfUnknowns;
     };
 
-    // Compare two error scores: returns 1 if (1) is worse, -1 if better, 0 if equal.
-    // Primary key: total errors (fewer better). Tie-break: fewer FALSEs better.
+    // Compare two error scores by total error count (fewer is better).
+    // Returns 1 if (1) is worse, -1 if better, 0 if equal.
     static int compare(unsigned int numberOfFalses1, unsigned int numberOfUnknowns1, unsigned int numberOfFalses2, unsigned int numberOfUnknowns2)
     {
-        if (numberOfFalses1 + numberOfUnknowns1 == numberOfFalses2 + numberOfUnknowns2)
+        const unsigned int total1 = numberOfFalses1 + numberOfUnknowns1;
+        const unsigned int total2 = numberOfFalses2 + numberOfUnknowns2;
+        if (total1 > total2)
         {
-            if (numberOfFalses1 == numberOfFalses2)
-            {
-                return 0;
-            }
-            else
-            {
-                if (numberOfFalses1 > numberOfFalses2)
-                {
-                    return 1;
-                }
-                else
-                {
-                    return -1;
-                }
-            }
+            return 1;
         }
-        else
+        if (total1 < total2)
         {
-            if (numberOfFalses1 + numberOfUnknowns1 > numberOfFalses2 + numberOfUnknowns2)
-            {
-                return 1;
-            }
-            else
-            {
-                return -1;
-            }
+            return -1;
         }
+        return 0;
     }
 
     // 3 trit inputs, 3^3 = 27 lines per LUT (one output trit per neighbour-trit combination).
