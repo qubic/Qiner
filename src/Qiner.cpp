@@ -102,6 +102,8 @@ static std::atomic<char> state(0);
 
 static unsigned char computorPublicKey[32];
 static unsigned char randomSeed[32];
+// Epoch-start Spectrum Digest selects the Addition training subset; empty (all zero) when none is provided.
+static unsigned char epochStartSpectrumDigest[32];
 static std::atomic<long long> numberOfMiningIterations(0);
 static std::atomic<unsigned int> numberOfFoundSolutions(0);
 static std::queue<std::array<unsigned char, 32>> foundNonce;
@@ -188,7 +190,8 @@ using HyperIdentityMiner = score_hyberidentity::Miner<
 int miningThreadProc()
 {
     std::unique_ptr<AdditionMiner> additionMiner(new AdditionMiner());
-    additionMiner->initialize(randomSeed);
+    // Addition requires the epoch-start Spectrum Digest; it drives the training subset.
+    additionMiner->initialize(randomSeed, epochStartSpectrumDigest);
 
     std::unique_ptr<HyperIdentityMiner> hyperIdentityMiner(new HyperIdentityMiner());
     hyperIdentityMiner->initialize(randomSeed);
@@ -365,9 +368,9 @@ static void hexToByte(const char* hex, uint8_t* byte, const int sizeInByte)
 int main(int argc, char* argv[])
 {
     std::vector<std::thread> miningThreads;
-    if (argc != 7)
+    if (argc != 7 && argc != 8)
     {
-        printf("Usage:   Qiner [Node IP] [Node Port] [MiningID] [Signing Seed] [Mining Seed] [Number of threads]\n");
+        printf("Usage:   Qiner [Node IP] [Node Port] [MiningID] [Signing Seed] [Mining Seed] [Number of threads] [Epoch-start Spectrum Digest (optional)]\n");
     }
     else
     {
@@ -396,6 +399,18 @@ int main(int argc, char* argv[])
             //getIdentityFromPublicKey(signingPublicKey, miningID, false);
 
             hexToByte(argv[5], randomSeed, 32);
+
+            // Epoch-start Spectrum Digest is optional; without it the Addition training subset uses an empty digest.
+            if (argc == 8)
+            {
+                hexToByte(argv[7], epochStartSpectrumDigest, 32);
+            }
+            else
+            {
+                memset(epochStartSpectrumDigest, 0, sizeof(epochStartSpectrumDigest));
+                printf("WARNING: no Epoch-start Spectrum Digest provided, using an empty one for the Addition training subset.\n");
+            }
+
             unsigned int numberOfThreads = atoi(argv[6]);
             printf("%d threads are used.\n", numberOfThreads);
             miningThreads.reserve(numberOfThreads);

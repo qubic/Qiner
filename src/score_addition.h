@@ -42,7 +42,9 @@ struct Miner
     static constexpr unsigned long long maxNumberOfNeurons = populationThreshold;
     static constexpr unsigned long long numberOfEvolutionNeurons =
         populationThreshold - numberOfNeurons;   // P - K - L
-    static constexpr unsigned long long trainingSetSize = 1ULL << numberOfInputNeurons; // 2^K
+    // Half of the 2^K possible pairs are graded each epoch (chosen from the epoch-start spectrum digest).
+    static constexpr unsigned long long trainingSetSize = (1ULL << numberOfInputNeurons) / 2; // 2^(K-1)
+    static constexpr unsigned long long fullTrainingSetSize = trainingSetSize * 2; // 2^K total possible pairs
 
     // Undecided trit (the third value); the two decided states are 0 and 1.
     static constexpr unsigned char TRIT_UNKNOWN = 2;
@@ -89,19 +91,55 @@ struct Miner
 
     std::vector<unsigned char> poolVec;
 
-    void initialize(unsigned char miningSeed[32])
+    // The epoch-start Spectrum Digest is required; it selects the graded training subset.
+    void initialize(unsigned char miningSeed[32], const unsigned char epochStartSpectrumDigest[32])
     {
         // Init random2 pool with mining seed
         poolVec.resize(POOL_VEC_PADDING_SIZE);
         generateRandom2Pool(miningSeed, poolVec.data());
+
+        // Generate the full sample, then select the subset from the Spectrum Digest.
+        generateFullTrainingSet();
+        setEpochStartSpectrumDigest(epochStartSpectrumDigest);
     }
 
-    // Training set
+    // Select the graded subset deterministically from the epoch-start Spectrum Digest
+    void setEpochStartSpectrumDigest(const unsigned char epochStartSpectrumDigest[32])
+    {
+        // One 32-bit random draw per pick, squeezed directly from the digest.
+        random(epochStartSpectrumDigest, 32, (unsigned char*)selectionRandoms, trainingSetSize * sizeof(unsigned int));
+
+        // Select trainingSetSize distinct samples from the full set.
+        for (unsigned long long i = 0; i < fullTrainingSetSize; ++i)
+        {
+            pairIndexPool[i] = (unsigned int)i;
+        }
+        for (unsigned long long k = 0; k < trainingSetSize; ++k)
+        {
+            const unsigned long long remaining = fullTrainingSetSize - k;
+            const unsigned long long j = selectionRandoms[k] % remaining;
+
+            // Take pairIndexPool[j], remove it from the active range, copy that sample
+            const unsigned int pickedTrainingIndex = pairIndexPool[j];
+            // Swap the already pick to the tail to avoid duplicated selection
+            pairIndexPool[j] = pairIndexPool[remaining - 1];
+
+            trainingSet[k] = fullTrainingSet[pickedTrainingIndex];
+        }
+    }
+
     struct TraningPair
     {
         char input[numberOfInputNeurons]; // numberOfInputNeurons / 2 bits of A , and B (values: -1 or +1)
         char output[numberOfOutputNeurons];  // numberOfOutputNeurons bits of C (values: -1 or +1)
-    } trainingSet[trainingSetSize];       // training set size: 2^K
+    };
+    // All 2^K possible samples (generated once); trainingSet is the 2^(K-1) graded subset chosen per epoch.
+    TraningPair fullTrainingSet[fullTrainingSetSize];
+    TraningPair trainingSet[trainingSetSize];
+
+    // Scratch for the digest-driven selection: random draws and the pair-index pool.
+    unsigned int selectionRandoms[trainingSetSize];
+    unsigned int pairIndexPool[fullTrainingSetSize];
 
     // Data for running the ANN
     struct Neuron
@@ -318,7 +356,7 @@ struct Miner
     }
 
     // Generate all 2^K possible (A, B, C) pairs
-    void generateTrainingSet()
+    void generateFullTrainingSet()
     {
         static constexpr long long boundValue = (1LL << (numberOfInputNeurons / 2)) / 2;
         unsigned long long index = 0;
@@ -328,16 +366,16 @@ struct Miner
             {
                 long long C = A + B;
 
-                toTenaryBits<numberOfInputNeurons / 2>(A, trainingSet[index].input);
+                toTenaryBits<numberOfInputNeurons / 2>(A, fullTrainingSet[index].input);
                 toTenaryBits<numberOfInputNeurons / 2>(
-                    B, trainingSet[index].input + numberOfInputNeurons / 2);
-                toTenaryBits<numberOfOutputNeurons>(C, trainingSet[index].output);
+                    B, fullTrainingSet[index].input + numberOfInputNeurons / 2);
+                toTenaryBits<numberOfOutputNeurons>(C, fullTrainingSet[index].output);
                 index++;
             }
         }
     }
 
-    // Run the ANN over the whole training set and return its error counts.
+    // Run the ANN over the selected training subset and return its error counts.
     Score inferANN()
     {
         Score score;
@@ -386,9 +424,6 @@ struct Miner
 
         // Initialization fixed-topology: population is N total, set once.
         population = populationThreshold;
-
-        // Generate all 2^K possible (A, B, C) pairs
-        generateTrainingSet();
 
         // Initalize with nonce and public key
         random2(hash, poolVec.data(), (unsigned char*)&initValue, sizeof(InitValue));

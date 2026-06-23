@@ -8,6 +8,33 @@
 constexpr unsigned long long POOL_VEC_SIZE =  (((1ULL<<32) + 64)) >> 3; // 2^32+64 bits ~ 512MB
 constexpr unsigned long long POOL_VEC_PADDING_SIZE = (POOL_VEC_SIZE + 200 - 1) / 200 * 200; // padding for multiple of 200
 
+// Seed a Keccak state with up to 200 input bytes and squeeze outputSize bytes
+void random(const unsigned char* input, unsigned long long inputSize, unsigned char* output, unsigned long long outputSize)
+{
+    unsigned char state[200];
+    if (inputSize < sizeof(state))
+    {
+        memcpy(state, input, inputSize);
+        memset(state + inputSize, 0, sizeof(state) - inputSize);
+    }
+    else
+    {
+        memcpy(state, input, sizeof(state));
+    }
+
+    for (unsigned long long i = 0; i < outputSize / sizeof(state); i++)
+    {
+        KeccakP1600_Permute_12rounds(state);
+        memcpy(output, state, sizeof(state));
+        output += sizeof(state);
+    }
+    if (outputSize % sizeof(state))
+    {
+        KeccakP1600_Permute_12rounds(state);
+        memcpy(output, state, outputSize % sizeof(state));
+    }
+}
+
 void generateRandom2Pool(unsigned char miningSeed[32], unsigned char* pool)
 {
     unsigned char state[200];
