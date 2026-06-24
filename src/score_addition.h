@@ -109,8 +109,8 @@ struct Miner
     // Select the graded subset deterministically from the epoch-start Spectrum Digest
     void setEpochStartSpectrumDigest(const unsigned char epochStartSpectrumDigest[32])
     {
-        // One 32-bit random draw per pick, squeezed directly from the digest.
-        random(epochStartSpectrumDigest, 32, (unsigned char*)selectionRandoms, trainingSetSize * sizeof(unsigned int));
+        // One random from the digest fills the subset selection draws and the neuron placement.
+        random(epochStartSpectrumDigest, 32, (unsigned char*)&epochRandoms, sizeof(epochRandoms));
 
         // Select trainingSetSize distinct samples from the full set.
         for (unsigned long long i = 0; i < fullTrainingSetSize; ++i)
@@ -120,7 +120,7 @@ struct Miner
         for (unsigned long long k = 0; k < trainingSetSize; ++k)
         {
             const unsigned long long remaining = fullTrainingSetSize - k;
-            const unsigned long long j = selectionRandoms[k] % remaining;
+            const unsigned long long j = epochRandoms.selectionRandoms[k] % remaining;
 
             // Take pairIndexPool[j], remove it from the active range, copy that sample
             const unsigned int pickedTrainingIndex = pairIndexPool[j];
@@ -129,6 +129,9 @@ struct Miner
 
             trainingSet[k] = fullTrainingSet[pickedTrainingIndex];
         }
+
+        // Neuron placement is fixed per epoch from the digest; compute it once here.
+        computeNeuronPlacement();
     }
 
     struct TraningPair
@@ -140,8 +143,13 @@ struct Miner
     TraningPair fullTrainingSet[fullTrainingSetSize];
     TraningPair trainingSet[trainingSetSize];
 
-    // Scratch for the digest-driven selection: random draws and the pair-index pool.
-    unsigned int selectionRandoms[trainingSetSize];
+    // Per-epoch data from the spectrum digest
+    struct EpochRandoms
+    {
+        unsigned int selectionRandoms[trainingSetSize];
+        unsigned long long inputNeuronPositions[numberOfInputNeurons];
+        unsigned long long outputNeuronPositions[numberOfOutputNeurons];
+    } epochRandoms;
     unsigned int pairIndexPool[fullTrainingSetSize];
 
     // Data for running the ANN
@@ -171,11 +179,10 @@ struct Miner
 
     struct InitValue
     {
-        unsigned long long outputNeuronPositions[numberOfOutputNeurons];
-        unsigned long long evolutionNeuronPositions[numberOfEvolutionNeurons];
         unsigned char lutInit[maxNumberOfNeurons * lutSize]; // one byte per LUT line, taken mod 3
         unsigned long long mutationSeed[numberOfMutations * MAX_LUT_ENTRIES_PER_STEP];
     } initValue;
+
 
     unsigned long long neuronIndices[maxNumberOfNeurons];
     unsigned char nextNeuronValue[maxNumberOfNeurons];
@@ -186,8 +193,11 @@ struct Miner
     unsigned long long outputNeuronIndices[numberOfOutputNeurons];
     unsigned char outputNeuronExpectedValue[numberOfOutputNeurons];
 
+    // Epoch-fixed neuron placement (input/output/evolution), computed once from the spectrum digest.
+    Neuron::Type neuronTypes[maxNumberOfNeurons];
+
     // Indices of all non-input neurons (output + evolution), the only ones whose LUT is used
-    // and the only ones a mutation may touch. Filled in initializeANN().
+    // and the only ones a mutation may touch. Filled in computeNeuronPlacement().
     unsigned long long updatedNeuronIndices[maxNumberOfNeurons];
     unsigned long long numberOfUpdatedNeurons;
 
@@ -223,6 +233,48 @@ struct Miner
                     nnIndex = (long long)n + (long long)populationThreshold + value;
                 }
                 sourceNeuron[n][k] = (unsigned long long)(nnIndex % (long long)populationThreshold);
+            }
+        }
+    }
+
+    // Neuron placement (input/output/evolution types) from the digest, computed once per epoch.
+    void computeNeuronPlacement()
+    {
+        for (unsigned long long i = 0; i < populationThreshold; ++i)
+        {
+            neuronIndices[i] = i;
+            neuronTypes[i] = Neuron::kEvolution;
+        }
+        unsigned long long neuronCount = populationThreshold;
+
+        // Input positions from the remaining pool
+        for (unsigned long long i = 0; i < numberOfInputNeurons; ++i)
+        {
+            unsigned long long inputNeuronIdx = epochRandoms.inputNeuronPositions[i] % neuronCount;
+            neuronTypes[neuronIndices[inputNeuronIdx]] = Neuron::kInput;
+            neuronCount = neuronCount - 1;
+            neuronIndices[inputNeuronIdx] = neuronIndices[neuronCount];
+        }
+
+        // Output positions from the remaining pool
+        for (unsigned long long i = 0; i < numberOfOutputNeurons; ++i)
+        {
+            unsigned long long outputNeuronIdx = epochRandoms.outputNeuronPositions[i] % neuronCount;
+            neuronTypes[neuronIndices[outputNeuronIdx]] = Neuron::kOutput;
+            outputNeuronIndices[i] = neuronIndices[outputNeuronIdx];
+            neuronCount = neuronCount - 1;
+            neuronIndices[outputNeuronIdx] = neuronIndices[neuronCount];
+        }
+        // The remaining neurons stay kEvolution.
+
+        // Cache the indices of all updated (non-input) neurons for mutation.
+        numberOfUpdatedNeurons = 0;
+        for (unsigned long long i = 0; i < populationThreshold; ++i)
+        {
+            if (neuronTypes[i] != Neuron::kInput)
+            {
+                updatedNeuronIndices[numberOfUpdatedNeurons] = i;
+                numberOfUpdatedNeurons++;
             }
         }
     }
@@ -408,50 +460,14 @@ struct Miner
         // Initialization fixed-topology: population is N total, set once.
         population = populationThreshold;
 
-        // Initalize with nonce and public key
+        // LUT init and the mutation come from the nonce
         random2(hash, poolVec.data(), (unsigned char*)&initValue, sizeof(InitValue));
 
-        // Randomly choose the positions of neurons types. Default = Input.
+        // Apply the epoch-fixed neuron placement
         for (unsigned long long i = 0; i < population; ++i)
         {
-            neuronIndices[i] = i;
-            neurons[i].type = Neuron::kInput;
+            neurons[i].type = neuronTypes[i];
             neurons[i].value = TRIT_UNKNOWN;
-        }
-        unsigned long long neuronCount = population;
-
-        // Output positions from the remaining pool
-        for (unsigned long long i = 0; i < numberOfOutputNeurons; ++i)
-        {
-            unsigned long long outputNeuronIdx = initValue.outputNeuronPositions[i] % neuronCount;
-
-            neurons[neuronIndices[outputNeuronIdx]].type = Neuron::kOutput;
-            outputNeuronIndices[i] = neuronIndices[outputNeuronIdx];
-
-            neuronCount = neuronCount - 1;
-            neuronIndices[outputNeuronIdx] = neuronIndices[neuronCount];
-        }
-
-        // Evolution positions from the remaining pool
-        for (unsigned long long i = 0; i < numberOfEvolutionNeurons; ++i)
-        {
-            unsigned long long evolutionNeuronIdx = initValue.evolutionNeuronPositions[i] % neuronCount;
-
-            neurons[neuronIndices[evolutionNeuronIdx]].type = Neuron::kEvolution;
-
-            neuronCount = neuronCount - 1;
-            neuronIndices[evolutionNeuronIdx] = neuronIndices[neuronCount];
-        }
-
-        // Cache the indices of all updated (non-input) neurons for mutation.
-        numberOfUpdatedNeurons = 0;
-        for (unsigned long long i = 0; i < population; ++i)
-        {
-            if (neurons[i].type != Neuron::kInput)
-            {
-                updatedNeuronIndices[numberOfUpdatedNeurons] = i;
-                numberOfUpdatedNeurons++;
-            }
         }
 
         // Seed every LUT line with a trit.
