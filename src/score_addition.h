@@ -170,7 +170,6 @@ struct Miner
     {
         Neuron neurons[maxNumberOfNeurons];
         unsigned char lut[maxNumberOfNeurons][lutSize];
-        unsigned long long population;
     };
     ANN bestANN;
     ANN currentANN;
@@ -282,7 +281,7 @@ struct Miner
     // Inference step, every non-input neuron looks up its next trit from the trits of its neighbours
     void processTick()
     {
-        unsigned long long population = currentANN.population;
+        const unsigned long long population = populationThreshold;
         Neuron* neurons = currentANN.neurons;
 
         for (unsigned long long n = 0; n < population; ++n)
@@ -312,7 +311,7 @@ struct Miner
 
     void loadTrainingData(unsigned long long trainingIndex)
     {
-        unsigned long long population = currentANN.population;
+        const unsigned long long population = populationThreshold;
         Neuron* neurons = currentANN.neurons;
 
         const auto& data = trainingSet[trainingIndex];
@@ -339,7 +338,7 @@ struct Miner
     // Tick simulation only runs on one ANN
     void runTickSimulation(unsigned long long trainingIndex)
     {
-        unsigned long long population = currentANN.population;
+        const unsigned long long population = populationThreshold;
         Neuron* neurons = currentANN.neurons;
 
         loadTrainingData(trainingIndex);
@@ -367,7 +366,7 @@ struct Miner
     // Count the output errors of the current ANN, FALSE (decided wrong) and UNKNOWN (undecided).
     void countOutputErrors(Score& score)
     {
-        unsigned long long population = currentANN.population;
+        const unsigned long long population = populationThreshold;
         Neuron* neurons = currentANN.neurons;
 
         unsigned long long outputIdx = 0;
@@ -454,11 +453,8 @@ struct Miner
         combined[34] = 0;
         KangarooTwelve(combined, 64, hash, 32);
 
-        unsigned long long& population = currentANN.population;
+        const unsigned long long population = populationThreshold;
         Neuron* neurons = currentANN.neurons;
-
-        // Initialization fixed-topology: population is N total, set once.
-        population = populationThreshold;
 
         // LUT init and the mutation come from the nonce
         random2(hash, poolVec.data(), (unsigned char*)&initValue, sizeof(InitValue));
