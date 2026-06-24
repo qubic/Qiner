@@ -101,6 +101,7 @@ constexpr unsigned int kDefaultTotalSamples = 32;
 std::vector<m256i> miningSeeds;
 std::vector<m256i> publicKeys;
 std::vector<m256i> nonces;
+std::vector<m256i> spectrumDigests;
 std::vector<std::vector<unsigned int>> scoreResults;
 std::vector<std::vector<unsigned long long>> scoreProcessingTimes;
 unsigned int processedSamplesCount = 0;
@@ -164,7 +165,7 @@ void writeConfigs(std::ostream &oFile, std::index_sequence<Is...>)
 
 // Recursive template to process each element in scoreSettings
 template <unsigned long long i>
-static void processElement(unsigned char *miningSeed, unsigned char *publicKey, unsigned char *nonce, int threadId, bool writeFile)
+static void processElement(unsigned char *miningSeed, unsigned char *publicKey, unsigned char *nonce, unsigned char *spectrumDigest, int threadId, bool writeFile)
 {
     using CurrentConfig = std::tuple_element_t<i, ConfigList>;
     auto t0 = std::chrono::high_resolution_clock::now();
@@ -197,7 +198,7 @@ static void processElement(unsigned char *miningSeed, unsigned char *publicKey, 
     else if (gSelectedAlgorithm == AlgoType::Addition)
     {
         std::unique_ptr<AdditionMiner> miner = std::make_unique<AdditionMiner>();
-        miner->initialize(miningSeed);
+        miner->initialize(miningSeed, spectrumDigest);
         score_value = miner->computeScore(publicKey, nonce);
     }
 
@@ -210,16 +211,16 @@ static void processElement(unsigned char *miningSeed, unsigned char *publicKey, 
 
 // Main processing function
 template <std::size_t N, std::size_t... Is>
-static void processHelper(unsigned char *miningSeed, unsigned char *publicKey, unsigned char *nonce, int threadId, bool writeFile, std::index_sequence<Is...>)
+static void processHelper(unsigned char *miningSeed, unsigned char *publicKey, unsigned char *nonce, unsigned char *spectrumDigest, int threadId, bool writeFile, std::index_sequence<Is...>)
 {
-    (processElement<Is>(miningSeed, publicKey, nonce, threadId, writeFile), ...);
+    (processElement<Is>(miningSeed, publicKey, nonce, spectrumDigest, threadId, writeFile), ...);
 }
 
 // Recursive template to process each element in scoreSettings
 template <std::size_t N>
-static void process(unsigned char *miningSeed, unsigned char *publicKey, unsigned char *nonce, int threadId = 0, bool writeFile = true)
+static void process(unsigned char *miningSeed, unsigned char *publicKey, unsigned char *nonce, unsigned char *spectrumDigest, int threadId = 0, bool writeFile = true)
 {
-    processHelper<N>(miningSeed, publicKey, nonce, threadId, writeFile, std::make_index_sequence<N>{});
+    processHelper<N>(miningSeed, publicKey, nonce, spectrumDigest, threadId, writeFile, std::make_index_sequence<N>{});
 }
 
 int generateSamples(std::string sampleFileName, unsigned int numberOfSamples, bool initMiningZeros = false)
@@ -238,10 +239,12 @@ int generateSamples(std::string sampleFileName, unsigned int numberOfSamples, bo
         miningSeeds.resize(numberOfSamples);
         publicKeys.resize(numberOfSamples);
         nonces.resize(numberOfSamples);
+        spectrumDigests.resize(numberOfSamples);
         for (unsigned int i = 0; i < numberOfSamples; i++)
         {
             publicKeys[i].setRandomValue();
             nonces[i].setRandomValue();
+            spectrumDigests[i].setRandomValue();
             if (initMiningZeros)
             {
                 memset(miningSeeds[i].m256i_u8, 0, 32);
@@ -261,16 +264,18 @@ int generateSamples(std::string sampleFileName, unsigned int numberOfSamples, bo
         }
 
         // Write the input to file
-        sampleFile << "seed, publickey, nonce" << std::endl;
+        sampleFile << "seed, publickey, nonce, spectrumdigest" << std::endl;
         for (unsigned int i = 0; i < numberOfSamples; i++)
         {
             auto miningSeedHexStr = byteToHex(miningSeeds[i].m256i_u8, 32);
             auto publicKeyHexStr = byteToHex(publicKeys[i].m256i_u8, 32);
             auto nonceHexStr = byteToHex(nonces[i].m256i_u8, 32);
+            auto spectrumDigestHexStr = byteToHex(spectrumDigests[i].m256i_u8, 32);
             sampleFile
                 << miningSeedHexStr << ", "
                 << publicKeyHexStr << ", "
-                << nonceHexStr << std::endl;
+                << nonceHexStr << ", "
+                << spectrumDigestHexStr << std::endl;
         }
         if (sampleFile.is_open())
         {
@@ -295,11 +300,12 @@ int generateSamples(std::string sampleFileName, unsigned int numberOfSamples, bo
         miningSeeds.resize(totalSamples);
         publicKeys.resize(totalSamples);
         nonces.resize(totalSamples);
+        spectrumDigests.resize(totalSamples);
         for (auto i = 0; i < totalSamples; i++)
         {
-            if (sampleString[i].size() != 3)
+            if (sampleString[i].size() != 3 && sampleString[i].size() != 4)
             {
-                std::cout << "Number of elements is mismatched. " << sampleString[i].size() << " vs 3" << " Exiting..." << std::endl;
+                std::cout << "Number of elements is mismatched. " << sampleString[i].size() << " vs 3 or 4" << " Exiting..." << std::endl;
                 return 1;
             }
             if (initMiningZeros)
@@ -313,6 +319,16 @@ int generateSamples(std::string sampleFileName, unsigned int numberOfSamples, bo
 
             hexToByte(sampleString[i][1], 32, publicKeys[i].m256i_u8);
             hexToByte(sampleString[i][2], 32, nonces[i].m256i_u8);
+
+            // Spectrum Digest (Addition only). Legacy 3-column files default to a zero digest.
+            if (sampleString[i].size() == 4)
+            {
+                hexToByte(sampleString[i][3], 32, spectrumDigests[i].m256i_u8);
+            }
+            else
+            {
+                memset(spectrumDigests[i].m256i_u8, 0, 32);
+            }
         }
         std::cout << "Read sample file DONE " << std::endl;
     }
@@ -386,7 +402,7 @@ void generateScore(
                     output_file.close();
                 }
             }
-            process<numberOfGeneratedSetting>(miningSeeds[i].m256i_u8, publicKeys[i].m256i_u8, nonces[i].m256i_u8, i, writeFilePerSample);
+            process<numberOfGeneratedSetting>(miningSeeds[i].m256i_u8, publicKeys[i].m256i_u8, nonces[i].m256i_u8, spectrumDigests[i].m256i_u8, i, writeFilePerSample);
 
             {
                 std::lock_guard<std::mutex> lock(gMutex);

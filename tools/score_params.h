@@ -76,22 +76,22 @@ struct ConfigPair
 // All configurations
 using Config0 = ConfigPair<
     HyperIdentityParams<64, 64, 50, 64, 178, 50, 36>,
-    AdditionParams<2 * 2, 3, 200, 3, 16, 400, 36>
+    AdditionParams<2 * 2, 3, 120, 3, 64, 100, 19>
 >;
 
 using Config1 = ConfigPair<
     HyperIdentityParams<256, 256, 120, 256, 612, 100, 171>,
-    AdditionParams<4 * 2, 5, 200, 3, 32, 400, 171>
+    AdditionParams<4 * 2, 5, 120, 3, 128, 100, 512>
 >;
 
 using Config2 = ConfigPair<
     HyperIdentityParams<512, 512, 150, 512, 1174, 150, 300>,
-    AdditionParams<7 * 2, 8, 100, 3, 32, 200, 600>
+    AdditionParams<7 * 2, 8, 120, 3, 256, 100, 52428>
 >;
 
 using Config3 = ConfigPair<
     HyperIdentityParams<1024, 1024, 200, 1024, 3000, 200, 600>,
-    AdditionParams<7 * 2, 8, 150, 3, 64, 500, 600>
+    AdditionParams<7 * 2, 8, 120, 3, 512, 100, 52428>
 >;
 
 using ConfigList = std::tuple<Config0, Config1, Config2, Config3>;
