@@ -11,6 +11,16 @@ target_include_directories(score_test_generator
 # Linking
 set(TOOLS_LINK_LIBS Threads::Threads)
 
-target_link_libraries(score_test_generator 
-    PRIVATE    
+target_link_libraries(score_test_generator
+    PRIVATE
+    ${TOOLS_LINK_LIBS})
+
+add_executable(lut_task_generator lut_task_generator.cpp)
+
+target_include_directories(lut_task_generator
+    PRIVATE
+    ${CMAKE_SOURCE_DIR}/src)
+
+target_link_libraries(lut_task_generator
+    PRIVATE
     ${TOOLS_LINK_LIBS})

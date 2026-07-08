@@ -22,7 +22,7 @@
 #endif
 
 #include "score_hyperidentity.h"
-#include "score_addition.h"
+#include "score_generic_lut.h"
 #include "keyUtils.h"
 
 struct RequestResponseHeader
@@ -104,6 +104,8 @@ static unsigned char computorPublicKey[32];
 static unsigned char randomSeed[32];
 // Epoch-start Spectrum Digest selects the Addition training subset; empty (all zero) when none is provided.
 static unsigned char epochStartSpectrumDigest[32];
+// Path to the Generic LUT task file (input/output trit data); overridable via CLI.
+static const char* taskFilePath = "task_lut.bin";
 static std::atomic<long long> numberOfMiningIterations(0);
 static std::atomic<unsigned int> numberOfFoundSolutions(0);
 static std::queue<std::array<unsigned char, 32>> foundNonce;
@@ -170,14 +172,16 @@ struct Stat
 
 } qinerStat;
 
-using AdditionMiner = score_addition::Miner<
-    score_addition::NUMBER_OF_INPUT_NEURONS,
-    score_addition::NUMBER_OF_OUTPUT_NEURONS,
-    score_addition::NUMBER_OF_TICKS,
-    score_addition::MAX_NEIGHBOR_NEURONS,
-    score_addition::POPULATION_THRESHOLD,
-    score_addition::NUMBER_OF_MUTATIONS,
-    score_addition::SOLUTION_THRESHOLD>;
+using LutMiner = score_generic_lut::Miner<
+    score_generic_lut::NUMBER_OF_INPUT_NEURONS,
+    score_generic_lut::NUMBER_OF_OUTPUT_NEURONS,
+    score_generic_lut::SEQUENCE_LENGTH,
+    score_generic_lut::WINDOW_WIDTH,
+    score_generic_lut::MAX_NUMBER_OF_TICKS,
+    score_generic_lut::NUMBER_OF_NEIGHBORS,
+    score_generic_lut::POPULATION_THRESHOLD,
+    score_generic_lut::NUMBER_OF_MUTATIONS,
+    score_generic_lut::SOLUTION_THRESHOLD>;
 using HyperIdentityMiner = score_hyberidentity::Miner<
     score_hyberidentity::NUMBER_OF_INPUT_NEURONS,
     score_hyberidentity::NUMBER_OF_OUTPUT_NEURONS,
@@ -189,9 +193,13 @@ using HyperIdentityMiner = score_hyberidentity::Miner<
 
 int miningThreadProc()
 {
-    std::unique_ptr<AdditionMiner> additionMiner(new AdditionMiner());
-    // Addition requires the epoch-start Spectrum Digest; it drives the training subset.
-    additionMiner->initialize(randomSeed, epochStartSpectrumDigest);
+    std::unique_ptr<LutMiner> lutMiner(new LutMiner());
+    // Generic LUT needs the epoch-start Spectrum Digest (placement/wiring) and the task file (data).
+    if (!lutMiner->initialize(randomSeed, epochStartSpectrumDigest, taskFilePath))
+    {
+        printf("Failed to load task file '%s' for the Generic LUT miner.\n", taskFilePath);
+        return -1;
+    }
 
     std::unique_ptr<HyperIdentityMiner> hyperIdentityMiner(new HyperIdentityMiner());
     hyperIdentityMiner->initialize(randomSeed);
@@ -219,7 +227,7 @@ int miningThreadProc()
         }
         else
         {
-            solutionFound = additionMiner->findSolution(computorPublicKey, nonce.data());
+            solutionFound = lutMiner->findSolution(computorPublicKey, nonce.data());
             // Stats
             qinerStat.totalAdditionNonce.fetch_add(1);
             if (solutionFound)
@@ -368,9 +376,9 @@ static void hexToByte(const char* hex, uint8_t* byte, const int sizeInByte)
 int main(int argc, char* argv[])
 {
     std::vector<std::thread> miningThreads;
-    if (argc != 7 && argc != 8)
+    if (argc != 7 && argc != 8 && argc != 9)
     {
-        printf("Usage:   Qiner [Node IP] [Node Port] [MiningID] [Signing Seed] [Mining Seed] [Number of threads] [Epoch-start Spectrum Digest (optional)]\n");
+        printf("Usage:   Qiner [Node IP] [Node Port] [MiningID] [Signing Seed] [Mining Seed] [Number of threads] [Epoch-start Spectrum Digest (optional)] [Task file path (optional)]\n");
     }
     else
     {
@@ -400,8 +408,8 @@ int main(int argc, char* argv[])
 
             hexToByte(argv[5], randomSeed, 32);
 
-            // Epoch-start Spectrum Digest is optional; without it the Addition training subset uses an empty digest.
-            if (argc == 8)
+            // Epoch-start Spectrum Digest is optional (argv[7]); without it the Addition training subset uses an empty digest.
+            if (argc >= 8)
             {
                 hexToByte(argv[7], epochStartSpectrumDigest, 32);
             }
@@ -409,6 +417,12 @@ int main(int argc, char* argv[])
             {
                 memset(epochStartSpectrumDigest, 0, sizeof(epochStartSpectrumDigest));
                 printf("WARNING: no Epoch-start Spectrum Digest provided, using an empty one for the Addition training subset.\n");
+            }
+
+            // Task file path is optional (argv[8]); defaults to task_lut.bin.
+            if (argc >= 9)
+            {
+                taskFilePath = argv[8];
             }
 
             unsigned int numberOfThreads = atoi(argv[6]);
