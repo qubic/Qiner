@@ -21,10 +21,12 @@
 #include <string>
 #include <vector>
 #include <random>
+#include <algorithm>
 
 #include "bpp9000_params.h"
 #include "task_file.h"
 #include "K12AndKeyUtil.h"
+#include "score_common.h"
 
 using Prod = bpp9000_params::ProdConfig;
 
@@ -150,6 +152,150 @@ static bool checkTopology(uint32_t N, uint32_t M, uint32_t K, uint32_t P,
 }
 
 // Topology from a fixed seed. Returns false if generation
+static uint32_t countAttendingNeurons(uint32_t N, uint32_t M, uint32_t K, uint32_t P,
+                                      const std::vector<uint32_t>& inputIdx,
+                                      const std::vector<uint32_t>& outputIdx,
+                                      uint32_t signalIdx,
+                                      const std::vector<uint32_t>& neighborIdx)
+{
+    std::vector<bool> reached(P, false);
+    std::vector<bool> isInput(P, false);
+    for (uint32_t i = 0; i < N; ++i)
+    {
+        isInput[inputIdx[i]] = true;
+    }
+    std::vector<uint32_t> frontier;
+    frontier.push_back(signalIdx);
+    for (uint32_t j = 0; j < M; ++j)
+    {
+        frontier.push_back(outputIdx[j]);
+    }
+    while (!frontier.empty())
+    {
+        const uint32_t n = frontier.back();
+        frontier.pop_back();
+        if (reached[n])
+        {
+            continue;
+        }
+        reached[n] = true;
+        if (isInput[n])
+        {
+            continue;
+        }
+        for (uint32_t k = 0; k < K; ++k)
+        {
+            frontier.push_back(neighborIdx[(size_t)n * K + k]);
+        }
+    }
+    uint32_t count = 0;
+    for (uint32_t n = 0; n < P; ++n)
+    {
+        if (reached[n])
+        {
+            ++count;
+        }
+    }
+    return count;
+}
+
+static unsigned long long measureTicksPerScore(const std::vector<unsigned char>& topoBlock,
+                                               const std::vector<unsigned char>& dataBlock,
+                                               const unsigned char* pool)
+{
+    const uint32_t N = (uint32_t)Prod::numberOfInputNeurons;
+    const uint32_t M = (uint32_t)Prod::numberOfOutputNeurons;
+    const uint32_t K = (uint32_t)Prod::numberOfNeighbors;
+    const uint32_t P = (uint32_t)Prod::populationThreshold;
+    const unsigned long long W = Prod::windowWidth;
+    const unsigned long long numberOfWindows = Prod::sequenceLength - Prod::windowWidth;
+    const unsigned char TRIT_UNKNOWN = 2;
+
+    std::vector<uint32_t> inputIdx(N), outputIdx(M), neighborIdx((size_t)P * K);
+    uint32_t signalIdx = 0;
+    task_file::parseTopologyBlock(topoBlock.data(), N, M, P, K,
+                                  inputIdx.data(), outputIdx.data(), &signalIdx, neighborIdx.data());
+
+    const unsigned long long inBytes = task_file::packedBytes(N);
+    const unsigned long long outBytes = task_file::packedBytes(M);
+    std::vector<unsigned char> inputs((size_t)Prod::sequenceLength * N);
+    std::vector<unsigned char> outputs((size_t)Prod::sequenceLength * M);
+    for (unsigned long long r = 0; r < Prod::sequenceLength; ++r)
+    {
+        const unsigned char* row = dataBlock.data() + r * (inBytes + outBytes);
+        task_file::unpackTrits(row, N, &inputs[r * N]);
+        task_file::unpackTrits(row + inBytes, M, &outputs[r * M]);
+    }
+
+    unsigned char probeKey[32];
+    memset(probeKey, 0x51, sizeof(probeKey));
+    unsigned char rootHash[32];
+    KangarooTwelve(probeKey, 32, rootHash, 32);
+    const unsigned long long lutSize = 27;
+    std::vector<unsigned char> lutRaw(((size_t)P * lutSize + 63) / 64 * 64);
+    random2(rootHash, (unsigned char*)pool, lutRaw.data(), lutRaw.size());
+    std::vector<unsigned char> lut((size_t)P * lutSize);
+    for (size_t i = 0; i < lut.size(); ++i)
+    {
+        lut[i] = (unsigned char)(lutRaw[i] % 3);
+    }
+
+    std::vector<bool> isInput(P, false);
+    for (uint32_t i = 0; i < N; ++i)
+    {
+        isInput[inputIdx[i]] = true;
+    }
+    std::vector<unsigned char> value(P), next(P);
+    unsigned long long totalTicks = 0;
+    for (unsigned long long win = 0; win < numberOfWindows; ++win)
+    {
+        std::fill(value.begin(), value.end(), TRIT_UNKNOWN);
+        unsigned long long feedCounter = 0;
+        unsigned long long tick = 0;
+        for (; tick < Prod::maxNumberOfTicks; ++tick)
+        {
+            if (value[signalIdx] == TRIT_UNKNOWN)
+            {
+                if (feedCounter >= W)
+                {
+                    break;
+                }
+                for (uint32_t i = 0; i < N; ++i)
+                {
+                    value[inputIdx[i]] = inputs[(win + feedCounter) * N + i];
+                }
+                feedCounter++;
+            }
+            else
+            {
+                for (uint32_t i = 0; i < N; ++i)
+                {
+                    value[inputIdx[i]] = TRIT_UNKNOWN;
+                }
+            }
+            for (uint32_t n = 0; n < P; ++n)
+            {
+                if (isInput[n])
+                {
+                    next[n] = value[n];
+                    continue;
+                }
+                const unsigned long long t0 = value[neighborIdx[(size_t)n * K + 0]];
+                const unsigned long long t1 = value[neighborIdx[(size_t)n * K + 1]];
+                const unsigned long long t2 = value[neighborIdx[(size_t)n * K + 2]];
+                next[n] = lut[n * lutSize + (t0 + 3 * t1 + 9 * t2)];
+            }
+            value.swap(next);
+        }
+        if (tick == Prod::maxNumberOfTicks)
+        {
+            return 0;
+        }
+        totalTicks += tick;
+    }
+    return totalTicks / numberOfWindows;
+}
+
 static bool buildTopology(std::vector<unsigned char>& topoBlock, uint64_t seed)
 {
     const uint32_t N = (uint32_t)Prod::numberOfInputNeurons;
@@ -272,13 +418,14 @@ int main(int argc, char** argv)
 {
     if (argc < 2)
     {
-        printf("Usage: bpp9000_task_from_candles <candles.csv> [out.task] [start-openms] [topo-seed]\n");
+        printf("Usage: bpp9000_task_from_candles <candles.csv> [out.task] [start-openms] [topo-seed] [seed-tries]\n");
         return 1;
     }
     const char* csvPath = argv[1];
     const char* outPath = (argc > 2) ? argv[2] : "bpp9000.task";
     const long long startOpenMs = (argc > 3) ? std::stoll(argv[3]) : -1;
     const uint64_t topoSeed = (argc > 4) ? (uint64_t)std::stoull(argv[4]) : 0x62707039303030ULL; // "bpp9000"
+    const uint64_t seedTries = (argc > 5) ? (uint64_t)std::stoull(argv[5]) : 1;
 
     std::vector<long long> openMs;
     std::vector<long long> closes;
@@ -325,11 +472,6 @@ int main(int argc, char** argv)
 
     std::vector<unsigned char> topo;
     std::vector<unsigned char> data;
-    if (!buildTopology(topo, topoSeed))
-    {
-        printf("Topology generation failed its own validity check - aborting.\n");
-        return 1;
-    }
 
     long long maxAbsDelta = 0;
     size_t saturated = 0;
@@ -337,6 +479,65 @@ int main(int argc, char** argv)
     {
         return 1;
     }
+
+    const uint32_t Nn = (uint32_t)Prod::numberOfInputNeurons;
+    const uint32_t Mn = (uint32_t)Prod::numberOfOutputNeurons;
+    const uint32_t Kn = (uint32_t)Prod::numberOfNeighbors;
+    const uint32_t Pn = (uint32_t)Prod::populationThreshold;
+    printf("Generating random2 probe pool for the topology sweep...\n");
+    std::vector<unsigned char> pool(POOL_VEC_PADDING_SIZE);
+    {
+        unsigned char probeSeed[32];
+        memset(probeSeed, 0x51, sizeof(probeSeed));
+        generateRandom2Pool(probeSeed, pool.data());
+    }
+    uint64_t chosenSeed = 0;
+    uint32_t chosenAttending = 0;
+    unsigned long long chosenTicks = ~0ULL;
+    std::vector<unsigned char> candidate;
+    for (uint64_t t = 0; t < seedTries; ++t)
+    {
+        const uint64_t seed = topoSeed + t;
+        candidate.clear();
+        if (!buildTopology(candidate, seed))
+        {
+            printf("seed 0x%llx: rejected (self-reference or duplicate neighbours)\n",
+                   (unsigned long long)seed);
+            continue;
+        }
+        std::vector<uint32_t> inputIdx(Nn), outputIdx(Mn), neighborIdx((size_t)Pn * Kn);
+        uint32_t signalIdx = 0;
+        task_file::parseTopologyBlock(candidate.data(), Nn, Mn, Pn, Kn,
+                                      inputIdx.data(), outputIdx.data(), &signalIdx, neighborIdx.data());
+        const uint32_t attending = countAttendingNeurons(Nn, Mn, Kn, Pn, inputIdx, outputIdx,
+                                                         signalIdx, neighborIdx);
+        const unsigned long long ticks = measureTicksPerScore(candidate, data, pool.data());
+        if (ticks == 0)
+        {
+            printf("seed 0x%llx: rejected (window timeout during the probe score)\n",
+                   (unsigned long long)seed);
+            continue;
+        }
+        printf("seed 0x%llx: %u/%u neurons attend the inference, %llu ticks per window\n",
+               (unsigned long long)seed, attending, Pn, ticks);
+        if (attending > chosenAttending ||
+            (attending == chosenAttending && ticks < chosenTicks))
+        {
+            chosenAttending = attending;
+            chosenTicks = ticks;
+            chosenSeed = seed;
+            topo = candidate;
+        }
+    }
+    if (chosenTicks == ~0ULL)
+    {
+        printf("No usable topology in [0x%llx, 0x%llx) - aborting.\n",
+               (unsigned long long)topoSeed, (unsigned long long)(topoSeed + seedTries));
+        return 1;
+    }
+    printf("Chosen topo-seed 0x%llx: %u/%u neurons attend, %llu ticks per window.\n",
+           (unsigned long long)chosenSeed, chosenAttending, Pn, chosenTicks);
+    printf("Verification cost scales with ticks per window; neurons outside the attending set never influence the score.\n");
     if (saturated > 0)
     {
         printf("WARNING: %zu deltas saturated to the 18-bit range (|delta| > %lld). Pick a flatter window.\n",
@@ -369,7 +570,7 @@ int main(int argc, char** argv)
     printf("Wrote %s (N=%u M=%u T=%llu P=%u K=%u, window %u, max|delta|=%lld USDT, topo-seed=0x%llx)\n",
            outPath, header.numInputTrits, header.numOutputTrits, (unsigned long long)header.numPairs,
            header.population, header.numNeighbors, (unsigned int)Prod::windowWidth,
-           maxAbsDelta, (unsigned long long)topoSeed);
+           maxAbsDelta, (unsigned long long)chosenSeed);
     printf("BPP9000_TOPOLOGY_HASH = %s\n", topoHex);
     printf("BPP9000_DATA_HASH     = %s\n", dataHex);
     return 0;
