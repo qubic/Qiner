@@ -102,7 +102,7 @@ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 8
 
 # Algorithm 2026-08-14 (ant colony on bpp9000)
 
-Standalone bpp9000 mining (`Qiner`) searches from your identity's root network for any network that scores at or below the epoch threshold; every solution stands alone. **Ant-colony mining is tree search over the same scorer.** You take a *parent* network already in the tree - your identity's root, or a node you placed earlier - inherit its LUTs, mutate them under your nonce, and score the result. A hit must clear the epoch threshold **and** strictly beat its parent's score. On acceptance it becomes a new tree node that can be extended further, so the colony converges toward the single lowest-error network of the epoch. Lower score is better - the score is an error count.
+Standalone bpp9000 mining (`Qiner`) searches from your identity's root network for any network that scores at or below the epoch threshold; every solution stands alone. **Ant-colony mining is tree search over the same scorer.** You take a *parent* network already in the tree - the epoch's shared root, or a node you placed earlier - inherit its LUTs, mutate them under your nonce, and score the result. A hit must clear the epoch threshold **and** strictly beat its parent's score. On acceptance it becomes a new tree node that can be extended further, so the colony converges toward the single lowest-error network of the epoch. Lower score is better - the score is an error count.
 
 Trees are **per-identity**: a forest, one tree per mining identity, and you only ever extend your own nodes. `AntMiner.cpp` is the reference implementation; the Standalone `Qiner` is unchanged and still available.
 
@@ -139,7 +139,7 @@ What `AntMiner` does each round:
 
 1. **Epoch context** (`REQUEST_ANT_EPOCH_CONTEXT`) - spectrum digest (seeds the `random2` pool), canonical task hashes, threshold, freshness window, per-parent child cap.
 2. **Task check** - load `--task`, require its topology/data hashes to equal the node's; abort otherwise.
-3. **Root** - `deriveRootANN(publicKey)` from the pool: your identity's per-epoch root network. Never stored on-chain; you compute it. The spectrum digest SEEDS the pool - the root is `deriveRootANN(publicKey, pool)`, **not** `K12(publicKey \|\| digest)`.
+3. **Root** - `deriveRootANN(spectrumDigest)` from the pool: the epoch's shared root network, identical for every identity. Never stored on-chain; you compute it. The spectrum digest both SEEDS the pool and is the root seed; per-identity variation enters only through the mutation seeds (`K12(publicKey || nonce || anchor)`).
 4. **Parent selection** - the best resolved own node (lowest score = deepest frontier), else the root. 1-in-8 rounds explore a random resolved node or the root instead, so the search does not lock into one basin. (Pools tune this policy.)
 5. **Anchor first** - pick the latest completed tick (stepping back past ticks the node stored no data for). Its digest `K12(anchorTick \|\| K12(TickData))` is part of the child RNG seed, so the anchor is fixed *before* mining and keeps the hit inside the freshness window.
 6. **Search** - random canonical nonce, `computeScoreFromParent(parentLUT, pubkey, nonce, anchorDigest)`; keep a hit when `score <= threshold` and `score < parentScore`.

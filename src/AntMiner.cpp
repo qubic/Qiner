@@ -47,7 +47,7 @@ static_assert(sizeof(RespondCurrentTickInfo) == 16, "RespondCurrentTickInfo unex
 
 struct RespondAntEpochContext
 {
-    unsigned char spectrumDigest[32];   // per-identity root seed; SEEDS the random2 pool, root = deriveRootANN(pubkey)
+    unsigned char spectrumDigest[32];   // the shared root seed; SEEDS the random2 pool, root = deriveRootANN(spectrumDigest)
     unsigned char topologyHash[32];     // canonical task topology-block hash (BPP9000_TOPOLOGY_HASH)
     unsigned char dataHash[32];         // canonical task data-block hash (BPP9000_DATA_HASH)
     unsigned int threshold;             // score threshold for this epoch (lowered on the test node)
@@ -823,8 +823,8 @@ int main(int argc, char* argv[])
         miner = std::make_unique<AntMinerT>();
         miner->setPool(sharedPool.data());
         miner->loadTaskFromMemory(gTopoBlock, gDataBlock);
-        miner->deriveRootANN(computorPublicKey, rootAnn);
-        printf("Per-identity root derived.\n");
+        miner->deriveRootANN(epochContext.spectrumDigest, rootAnn);
+        printf("Epoch root derived.\n");
 
         unsigned int threadCount = std::thread::hardware_concurrency();
         threadCount = (threadCount > 1) ? (threadCount - 1) : 1;

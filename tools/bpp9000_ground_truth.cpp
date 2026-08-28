@@ -269,7 +269,7 @@ int main(int argc, char** argv)
 
                     ProdMiner::ANN parentAnn;
                     memset(&parentAnn, 0, sizeof(parentAnn));
-                    miner->deriveRootANN(pub, parentAnn);   // level 0's parent = the derived root
+                    miner->deriveRootANN(localSeed, parentAnn);   // level 0's parent = the shared epoch root
                     bool anyInfinite = false;
                     for (int d = 0; d < depth; ++d)
                     {

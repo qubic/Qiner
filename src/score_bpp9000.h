@@ -410,8 +410,9 @@ struct Miner
         currentANN.lut[neuronIdx * lutSize + line] = newTrit;
     }
 
-    // Seed the ANN: root LUT from the pubkey alone (each computor's fixed root); mutation seeds from
-    // pubkey+nonce (nonce[0..2] are the algo/L/K knobs, excluded from the RNG). Returns the start score.
+    // Standalone path only: root LUT from the pubkey alone; the ant path derives the shared epoch
+    // root via deriveRootANN(rootSeed) instead. Mutation seeds from pubkey+nonce (nonce[0..2] are
+    // the algo/L/K knobs, excluded from the RNG). Returns the start score.
     unsigned int initializeANN(unsigned char* publicKey, unsigned char* nonce)
     {
         const unsigned long long population = populationThreshold;
@@ -571,11 +572,12 @@ struct Miner
         random2(searchHash, pRandom2Pool, (unsigned char*)&initValue.mutationSeed, sizeof(initValue.mutationSeed));
     }
 
-    // The per-identity root network: root LUT from the pubkey alone, written into a caller-owned ANN.
-    void deriveRootANN(const unsigned char* publicKey, ANN& out)
+    // The shared per-epoch root network: root LUT from the epoch-start spectrum digest, identical
+    // for every identity, written into a caller-owned ANN.
+    void deriveRootANN(const unsigned char* rootSeed, ANN& out)
     {
         unsigned char rootHash[32];
-        KangarooTwelve(publicKey, 32, rootHash, 32);
+        KangarooTwelve(rootSeed, 32, rootHash, 32);
         random2(rootHash, pRandom2Pool, (unsigned char*)&initValue.lutInit, sizeof(initValue.lutInit));
 
         for (unsigned long long i = 0; i < populationThreshold; ++i)
