@@ -634,8 +634,15 @@ static bool loadBpp9000TaskFile(const char* path)
         printf("Task file bad magic.\n");
         return false;
     }
+    if (h->numPairs < score_bpp9000::SEQUENCE_LENGTH)
+    {
+        printf("Task file has fewer pairs than the scored sequence length.\n");
+        return false;
+    }
     const unsigned long long topoBytes = task_file::topologyBytes(h->numInputTrits, h->numOutputTrits, h->population, h->numNeighbors);
-    const unsigned long long dataBytesLen = task_file::dataBytes(h->numInputTrits, h->numOutputTrits, h->numPairs);
+    // The canonical hashes cover only the scored sequenceLength pairs; pairs beyond them are an
+    // informational holdout tail.
+    const unsigned long long dataBytesLen = task_file::dataBytes(h->numInputTrits, h->numOutputTrits, score_bpp9000::SEQUENCE_LENGTH);
     gTopoBlock = gTaskBuffer.data() + sizeof(task_file::TaskFileHeader);
     gDataBlock = gTopoBlock + topoBytes;
     KangarooTwelve(gTopoBlock, (unsigned int)topoBytes, gTaskTopoHash, 32);

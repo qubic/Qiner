@@ -223,27 +223,32 @@ static bool buildTopology(std::vector<unsigned char>& topoBlock, uint64_t seed)
     return true;
 }
 
-// Encode the selected 8761 closes into the packed data block, per the spec.
+// Encode the selected closes into the packed data block, per the spec: the sequenceLength scored
+// pairs plus HOLDOUT_PAIRS extra pairs right after the training window - not scored, not hashed;
+// trackers read them to assess prediction accuracy out of sample.
+static constexpr uint64_t HOLDOUT_PAIRS = 1;
+
 static bool buildDataBlock(const std::vector<long long>& closes, size_t start,
                            std::vector<unsigned char>& dataBlock, long long& maxAbsDelta, size_t& saturated)
 {
     const uint32_t N = (uint32_t)Prod::numberOfInputNeurons;   // 18
     const uint32_t M = (uint32_t)Prod::numberOfOutputNeurons;  // 1
-    const uint64_t T = (uint64_t)Prod::sequenceLength;         // 8760 deltas
+    const uint64_t T = (uint64_t)Prod::sequenceLength;         // 8760 scored deltas
+    const uint64_t totalPairs = T + HOLDOUT_PAIRS;
 
-    if (start + T + 1 > closes.size())
+    if (start + totalPairs + 1 > closes.size())
     {
         printf("Not enough candles: need %llu from index %zu, have %zu\n",
-               (unsigned long long)(T + 1), start, closes.size());
+               (unsigned long long)(totalPairs + 1), start, closes.size());
         return false;
     }
 
-    std::vector<unsigned char> inputsBits((size_t)T * N);
-    std::vector<unsigned char> outputsBits((size_t)T * M);
+    std::vector<unsigned char> inputsBits((size_t)totalPairs * N);
+    std::vector<unsigned char> outputsBits((size_t)totalPairs * M);
     maxAbsDelta = 0;
     saturated = 0;
 
-    for (uint64_t j = 0; j < T; ++j)
+    for (uint64_t j = 0; j < totalPairs; ++j)
     {
         long long d = closes[start + j + 1] - closes[start + j];   // integer USDT delta
         if (d > INT18_MAX) { d = INT18_MAX; ++saturated; }
@@ -263,8 +268,8 @@ static bool buildDataBlock(const std::vector<long long>& closes, size_t start,
         outputsBits[(size_t)j * M] = (unsigned char)(d >= 0 ? 1 : 0);   // sign = predicted direction
     }
 
-    dataBlock.resize((size_t)task_file::dataBytes(N, M, T));
-    task_file::packDataBlock(N, M, T, inputsBits.data(), outputsBits.data(), dataBlock.data());
+    dataBlock.resize((size_t)task_file::dataBytes(N, M, totalPairs));
+    task_file::packDataBlock(N, M, totalPairs, inputsBits.data(), outputsBits.data(), dataBlock.data());
     return true;
 }
 
@@ -308,13 +313,14 @@ int main(int argc, char** argv)
         }
     }
     const uint64_t T = (uint64_t)Prod::sequenceLength;
-    if (start + T + 1 > closes.size())
+    const uint64_t totalPairs = T + HOLDOUT_PAIRS;
+    if (start + totalPairs + 1 > closes.size())
     {
         printf("Not enough candles from the chosen start: need %llu, have %zu\n",
-               (unsigned long long)(T + 1), closes.size() - start);
+               (unsigned long long)(totalPairs + 1), closes.size() - start);
         return 1;
     }
-    for (size_t i = start + 1; i <= start + T; ++i)
+    for (size_t i = start + 1; i <= start + totalPairs; ++i)
     {
         if (openMs[i] - openMs[i - 1] != 3600000LL)
         {
@@ -349,11 +355,14 @@ int main(int argc, char** argv)
     header.version = task_file::VERSION;
     header.numInputTrits = (unsigned int)Prod::numberOfInputNeurons;
     header.numOutputTrits = (unsigned int)Prod::numberOfOutputNeurons;
-    header.numPairs = Prod::sequenceLength;
+    header.numPairs = totalPairs;
     header.population = (unsigned int)Prod::populationThreshold;
     header.numNeighbors = (unsigned int)Prod::numberOfNeighbors;
     KangarooTwelve(topo.data(), (unsigned int)topo.size(), header.topologyHash, task_file::DATA_HASH_SIZE);
-    KangarooTwelve(data.data(), (unsigned int)data.size(), header.dataHash, task_file::DATA_HASH_SIZE);
+    // The data hash covers the scored region only, so the holdout tail never changes the pinned hash.
+    KangarooTwelve(data.data(),
+                   (unsigned int)task_file::dataBytes(header.numInputTrits, header.numOutputTrits, T),
+                   header.dataHash, task_file::DATA_HASH_SIZE);
 
     if (!task_file::writeTaskFile(outPath, header, topo.data(), topo.size(), data.data(), data.size()))
     {

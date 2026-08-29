@@ -108,7 +108,7 @@ struct Miner
             header.version != task_file::VERSION ||
             header.numInputTrits != numberOfInputNeurons ||
             header.numOutputTrits != numberOfOutputNeurons ||
-            header.numPairs != sequenceLength ||
+            header.numPairs < sequenceLength ||
             header.population != populationThreshold ||
             header.numNeighbors != numberOfNeighbors)
         {
