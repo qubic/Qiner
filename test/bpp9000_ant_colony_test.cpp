@@ -294,7 +294,6 @@ TEST_CASE("bpp9000 ant-colony seam", "[bpp9000AntColony]")
     REQUIRE(parseHex32(SEED_HEX, seed));
     const std::string taskPath = dataPath("bpp9000.task");
 
-    // deriveRootANN: cheap (no scoring walk), so pin all three on the main thread.
     {
         std::unique_ptr<ProdMiner> miner(new ProdMiner());
         REQUIRE(miner->initialize(seed, taskPath.c_str()));
@@ -522,9 +521,13 @@ TEST_CASE("bpp9000 ant-colony chain replay (gt_ant_production.csv)", "[bpp9000An
 
             unsigned char pub[32];
             std::memcpy(pub, chain.pubkey, 32);
+            unsigned char rootSeed[32];
+            std::memcpy(rootSeed, chain.seed, 32);
             ProdMiner::ANN parentAnn;
             std::memset(&parentAnn, 0, sizeof(parentAnn));
-            miner->deriveRootANN(pub, parentAnn);   // depth 0's parent = the derived root
+            // Depth 0's parent is the SHARED epoch root, seeded by the epoch's spectrum digest -
+            // the same for every identity. Must match bpp9000_ground_truth.cpp, which wrote the file.
+            miner->deriveRootANN(rootSeed, parentAnn);
 
             for (size_t d = 0; d < chain.nodes.size(); ++d)
             {
