@@ -26,57 +26,7 @@
 #include "keyUtils.h"
 #include "network.h"
 #include "K12AndKeyUtil.h"
-
-static constexpr unsigned char REQUEST_ANT_IDENTITY_TREE = 72;
-static constexpr unsigned char RESPOND_ANT_IDENTITY_TREE = 73;
-static constexpr unsigned char REQUEST_ANT_EPOCH_CONTEXT = 76;
-static constexpr unsigned char RESPOND_ANT_EPOCH_CONTEXT = 77;
-static constexpr unsigned int SIGNATURE_SIZE = 64;
-static constexpr unsigned int ROOT_TICK = 0u;
-static constexpr unsigned int ROOT_INDEX_IN_TICK = 0xFFFFFFFFu;
-
-// --- wire structs (match Qiner/src/AntMiner.cpp and core src/network_messages/ant_colony_message.h) ---
-struct RequestAntIdentityTree
-{
-    unsigned char pubkey[32];
-    unsigned int fromIndex;
-    unsigned int padding;
-};
-static_assert(sizeof(RequestAntIdentityTree) == 40, "RequestAntIdentityTree unexpected size");
-
-struct RespondAntIdentityTreeHeader
-{
-    unsigned int count;
-    unsigned int itemSize;
-    unsigned int nextIndex;
-};
-static_assert(sizeof(RespondAntIdentityTreeHeader) == 12, "RespondAntIdentityTreeHeader unexpected size");
-
-struct AntIdentityTreeNode
-{
-    unsigned int selfTick;
-    unsigned int selfSolutionIndexInTick;
-    unsigned int parentTick;
-    unsigned int parentSolutionIndexInTick;
-    unsigned int score;
-    unsigned int childCount;
-    unsigned int anchorTick;
-    unsigned int depth;
-};
-static_assert(sizeof(AntIdentityTreeNode) == 32, "AntIdentityTreeNode unexpected size");
-
-struct RespondAntEpochContext
-{
-    unsigned char spectrumDigest[32];
-    unsigned int threshold;
-    unsigned int freshnessWindow;
-    unsigned int solutionCount;
-    unsigned int freeAnnSlotsCount;
-    unsigned int maxChildrenPerParent;
-    unsigned short epoch;
-    unsigned short padding;
-};
-static_assert(sizeof(RespondAntEpochContext) == 56, "RespondAntEpochContext unexpected size");
+#include "ant_colony_message.h"
 
 using Ref = std::pair<unsigned int, unsigned int>;
 
@@ -254,6 +204,17 @@ static std::map<Ref, std::vector<int>> buildChildren(const std::vector<AntIdenti
     return children;
 }
 
+// First 8 bytes of a digest as hex - enough to eyeball agreement without flooding the line.
+static std::string hexPrefix(const unsigned char* digest)
+{
+    char text[17];
+    for (int i = 0; i < 8; i++)
+    {
+        snprintf(text + i * 2, 3, "%02x", digest[i]);
+    }
+    return std::string(text);
+}
+
 static void printAscii(const std::vector<AntIdentityTreeNode>& nodes, const RespondAntEpochContext* ctx,
     const char* ident, int maxDepth)
 {
@@ -269,8 +230,15 @@ static void printAscii(const std::vector<AntIdentityTreeNode>& nodes, const Resp
     printf("\n");
     if (ctx)
     {
-        printf("epoch %u  threshold=%u  child-cap=%s\n", ctx->epoch, ctx->threshold,
-            cap == 0 ? "unbound" : std::to_string(cap).c_str());
+        printf("epoch %u  threshold=%u  freshness=%u  child-cap=%s  tree=%u  free-ann=%u\n",
+            ctx->epoch, ctx->threshold, ctx->freshnessWindow,
+            cap == 0 ? "unbound" : std::to_string(cap).c_str(),
+            ctx->solutionCount, ctx->freeAnnSlotsCount);
+        // Must match the miners' .task file, or their scores will not match the node's.
+        printf("spectrum=%s  topology=%s  data=%s\n",
+            hexPrefix(ctx->spectrumDigest).c_str(),
+            hexPrefix(ctx->topologyHash).c_str(),
+            hexPrefix(ctx->dataHash).c_str());
     }
     printf("root  depth 0\n");
 
@@ -292,8 +260,12 @@ static void printAscii(const std::vector<AntIdentityTreeNode>& nodes, const Resp
             {
                 printf("  ");
             }
-            printf("[%u] d%u kids=%u anchor=%u%s%s\n", n.score, n.depth, n.childCount, n.anchorTick,
-                (cap && n.childCount >= cap) ? "  FULL" : "",
+            // From the listing's own edges: n.childCount is counted only up to the cap, so it
+            // reads 0 for every node while the cap is unbound.
+            const auto kidsIt = children.find(Ref(n.selfTick, n.selfSolutionIndexInTick));
+            const unsigned int kids = (kidsIt == children.end()) ? 0u : (unsigned int)kidsIt->second.size();
+            printf("[%u] d%u kids=%u anchor=%u%s%s\n", n.score, n.depth, kids, n.anchorTick,
+                (cap && kids >= cap) ? "  FULL" : "",
                 (idx == best) ? "  * best" : "");
             walk(Ref(n.selfTick, n.selfSolutionIndexInTick), indent + 1);
         }

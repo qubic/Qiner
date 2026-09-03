@@ -18,111 +18,7 @@
 #include "score_bpp9000.h"
 #include "keyUtils.h"
 #include "network.h"
-
-// Wire protocol (mirrors core/src/network_messages)
-
-#define MESSAGE_TYPE_ANT_SOLUTION 3
-#define BROADCAST_FUTURE_TICK_DATA 8
-#define REQUEST_TICK_DATA 16
-#define REQUEST_CURRENT_TICK_INFO 27
-#define RESPOND_CURRENT_TICK_INFO 28
-#define END_RESPONSE 35
-#define REQUEST_ANT_IDENTITY_TREE 72
-#define RESPOND_ANT_IDENTITY_TREE 73
-#define REQUEST_ANT_PARENT_ANN 74
-#define RESPOND_ANT_PARENT_ANN 75
-#define REQUEST_ANT_EPOCH_CONTEXT 76
-#define RESPOND_ANT_EPOCH_CONTEXT 77
-
-struct RespondCurrentTickInfo
-{
-    unsigned short tickDuration;
-    unsigned short epoch;
-    unsigned int tick;
-    unsigned short numberOfAlignedVotes;
-    unsigned short numberOfMisalignedVotes;
-    unsigned int initialTick;
-};
-static_assert(sizeof(RespondCurrentTickInfo) == 16, "RespondCurrentTickInfo unexpected size");
-
-struct RespondAntEpochContext
-{
-    unsigned char spectrumDigest[32];   // the shared root seed; SEEDS the random2 pool, root = deriveRootANN(spectrumDigest)
-    unsigned char topologyHash[32];     // canonical task topology-block hash (BPP9000_TOPOLOGY_HASH)
-    unsigned char dataHash[32];         // canonical task data-block hash (BPP9000_DATA_HASH)
-    unsigned int threshold;             // score threshold for this epoch (lowered on the test node)
-    unsigned int freshnessWindow;       // N: publish within N ticks of the anchor
-    unsigned int solutionCount;         // accepted solutions so far (the tree-growth readout)
-    unsigned int freeAnnSlotsCount;
-    unsigned int maxChildrenPerParent;  // ANT_MAX_CHILDREN_PER_PARENT; 0 = unbound
-    unsigned short epoch;
-    unsigned short padding;
-};
-static_assert(sizeof(RespondAntEpochContext) == 120, "RespondAntEpochContext unexpected size");
-
-struct RequestedTickData
-{
-    unsigned int tick;
-};
-static_assert(sizeof(RequestedTickData) == 4, "RequestedTickData unexpected size");
-
-// sizeof(TickData) in core: 8 + 8 + 32 + NUMBER_OF_TRANSACTIONS_PER_TICK(4096) * 32
-//                           + MAX_NUMBER_OF_CONTRACTS(1024) * 8 + SIGNATURE_SIZE(64).
-#define TICK_DATA_SIZE 139376U
-
-struct RequestAntIdentityTree
-{
-    unsigned char pubkey[32];   // whose tree to report; the miner's own identity
-    unsigned int fromIndex;     // resume cursor; 0 on the first call
-    unsigned int padding;
-};
-static_assert(sizeof(RequestAntIdentityTree) == 40, "RequestAntIdentityTree unexpected size");
-
-struct RespondAntIdentityTreeHeader
-{
-    unsigned int count;
-    unsigned int itemSize;
-    unsigned int nextIndex;
-};
-static_assert(sizeof(RespondAntIdentityTreeHeader) == 12, "RespondAntIdentityTreeHeader unexpected size");
-
-struct AntIdentityTreeNode
-{
-    unsigned int selfTick;            // a child sets this as its parentRef
-    unsigned int selfSolutionIndexInTick;
-    unsigned int parentTick;          // this node's own parent; (0, 0xFFFFFFFF) = root
-    unsigned int parentSolutionIndexInTick;
-    unsigned int score;
-    unsigned int childCount;
-    unsigned int anchorTick;
-    unsigned int depth;
-};
-static_assert(sizeof(AntIdentityTreeNode) == 32, "AntIdentityTreeNode unexpected size");
-
-// ROOT sentinel of a parent reference (matches core SolutionRef ROOT_REF).
-static constexpr unsigned int ROOT_TICK = 0U;
-static constexpr unsigned int ROOT_INDEX_IN_TICK = 0xFFFFFFFFU;
-
-struct RequestAntParentAnn
-{
-    unsigned int parentRefTick;
-    unsigned int parentRefSolutionIndexInTick;
-};
-static_assert(sizeof(RequestAntParentAnn) == 8, "RequestAntParentAnn unexpected size");
-
-static constexpr unsigned char ANT_PARENT_ANN_STATUS_OK = 0;
-static constexpr unsigned char ANT_PARENT_ANN_STATUS_NOT_FOUND = 1;
-static constexpr unsigned char ANT_PARENT_ANN_STATUS_IS_ROOT = 2;
-
-struct RespondAntParentAnnHeader
-{
-    unsigned int parentRefTick;
-    unsigned int parentRefSolutionIndexInTick;
-    unsigned int annSizeBytes;
-    unsigned char status;
-    unsigned char padding[3];
-};
-static_assert(sizeof(RespondAntParentAnnHeader) == 16, "RespondAntParentAnnHeader unexpected size");
+#include "ant_colony_message.h"
 
 // Actual miner software will modify the strategy accordingly
 // Demo is greedy exploration rate: 1 in this many mining rounds extends a random resolved
@@ -393,6 +289,25 @@ static bool queryIdentityTree(ServerSocket& sock, const unsigned char* signingSu
     return true;
 }
 
+// Page the whole identity-tree listing for one pubkey
+static bool fetchIdentityTree(ServerSocket& sock, const unsigned char* signingSubseed, const unsigned char* signingPublicKey,
+    const unsigned char* pubkey, std::vector<AntIdentityTreeNode>& out)
+{
+    std::vector<AntIdentityTreeNode> entries;
+    unsigned int fromIndex = 0;
+    do
+    {
+        unsigned int nextIndex = 0;
+        if (!queryIdentityTree(sock, signingSubseed, signingPublicKey, pubkey, fromIndex, entries, nextIndex))
+        {
+            return false;
+        }
+        fromIndex = nextIndex;
+    } while (fromIndex != 0);
+    out.swap(entries);
+    return true;
+}
+
 // The node's canonical ANN wire form: LUT rows only, row k = neuron updatedNeuronIndices[k]
 // (dense by updated-neuron position). This miner's ANN struct carries neuron states and keeps LUT
 // rows at absolute neuron indices, so wire bytes and local bytes are never comparable directly.
@@ -455,6 +370,18 @@ static bool annMatchesCanonicalLut(const AntMinerT& m, const AntMinerT::ANN& loc
     return true;
 }
 
+// Rebuild a local ANN from the node's canonical LUT
+static void annFromCanonicalLut(const AntMinerT& m, const unsigned char* canonicalLut,
+    const AntMinerT::ANN& rootAnn, AntMinerT::ANN& out)
+{
+    memcpy(&out, &rootAnn, sizeof(AntMinerT::ANN));
+    for (unsigned long long k = 0; k < m.numberOfUpdatedNeurons; k++)
+    {
+        const unsigned long long n = m.updatedNeuronIndices[k];
+        memcpy(&out.lut[n * AntMinerT::lutSize], &canonicalLut[k * AntMinerT::lutSize], AntMinerT::lutSize);
+    }
+}
+
 // One node of this miner's own tree (isolated per-identity trees)
 struct OwnNode
 {
@@ -473,15 +400,31 @@ struct OwnNode
     AntMinerT::ANN ann;                     // this node's evolved ANN (bestANN at mining time)
 };
 
-// Count this miner's own children already committed under a parent. Trees are per-identity
-// (isolated), so our own submissions ARE that parent's child count, which the cap bounds.
-static unsigned int localChildCount(const std::vector<OwnNode>& nodes,
-    unsigned int parentTick, unsigned int parentSolutionIndexInTick)
+// Children a parent already holds, from the node's listing plus anything submitted since the last
+// resolve cycle. The listing is what the node's own cap check uses and it survives a restart; only
+// unresolved own nodes are added, a resolved one is already counted in the listing.
+static unsigned int childCountOf(const std::vector<AntIdentityTreeNode>& listing,
+    const std::vector<OwnNode>& ownNodes, unsigned int parentTick, unsigned int parentSolutionIndexInTick)
 {
+    const bool isRoot = (parentTick == ROOT_TICK && parentSolutionIndexInTick == ROOT_INDEX_IN_TICK);
     unsigned int count = 0;
-    for (const OwnNode& node : nodes)
+    for (const AntIdentityTreeNode& entry : listing)
     {
-        if (node.parentTick == parentTick
+        if (isRoot)
+        {
+            // ROOT has no entry of its own, so count the depth-1 records instead.
+            count += (entry.depth == 1U) ? 1U : 0U;
+        }
+        else if (entry.selfTick == parentTick && entry.selfSolutionIndexInTick == parentSolutionIndexInTick)
+        {
+            count = entry.childCount;
+            break;
+        }
+    }
+    for (const OwnNode& node : ownNodes)
+    {
+        if (!node.refKnown
+            && node.parentTick == parentTick
             && node.parentSolutionIndexInTick == parentSolutionIndexInTick)
         {
             count++;
@@ -502,7 +445,7 @@ static bool submitAntSolution(ServerSocket& sock,
     {
         RequestResponseHeader header;
         Message message;
-        unsigned char payload[48];
+        unsigned char payload[sizeof(AntSolutionBroadcastPayload)];
         unsigned char signature[64];
     } packet;
 
@@ -530,18 +473,19 @@ static bool submitAntSolution(ServerSocket& sock,
         KangarooTwelve(sharedKeyAndGammingNonce, 64, gammingKey, 32);
     } while (gammingKey[0] != MESSAGE_TYPE_ANT_SOLUTION);
 
-    unsigned char plain[48];
-    memcpy(plain, &parentTick, 4);
-    memcpy(plain + 4, &parentSolutionIndexInTick, 4);
-    memcpy(plain + 8, &anchorTick, 4);
-    memcpy(plain + 12, &claimedScore, 4);
-    memcpy(plain + 16, nonce, 32);
+    AntSolutionBroadcastPayload plain;
+    plain.parentTick = parentTick;
+    plain.parentSolutionIndexInTick = parentSolutionIndexInTick;
+    plain.anchorTick = anchorTick;
+    plain.claimedScore = claimedScore;
+    memcpy(plain.nonce, nonce, 32);
 
     unsigned char gamma[sizeof(plain)];
     KangarooTwelve(gammingKey, 32, gamma, sizeof(gamma));
+    const unsigned char* plainBytes = (const unsigned char*)&plain;
     for (unsigned int i = 0; i < sizeof(plain); i++)
     {
-        packet.payload[i] = plain[i] ^ gamma[i];
+        packet.payload[i] = plainBytes[i] ^ gamma[i];
     }
 
     unsigned char digest[32];
@@ -860,6 +804,84 @@ int main(int argc, char* argv[])
     unsigned int cachedAnchorTick = 0xFFFFFFFFU;
     unsigned char cachedAnchorDigest[32];
 
+    // Adopt the tree this identity already holds on the node, so a restart continues from the
+    // on-chain frontier instead of climbing again from ROOT. One tree walk plus one ANN fetch per
+    // node; nothing is stored locally.
+    {
+        std::vector<AntIdentityTreeNode> existing;
+        if (!fetchIdentityTree(sock, operatorSubseed, operatorPublicKey, computorPublicKey, existing))
+        {
+            printf("WARNING: could not read this identity's existing tree%s - mining restarts from ROOT.\n",
+                (operatorSeed != nullptr) ? "" : " (no --operator seed given; the tree query is operator-signed)");
+        }
+        else
+        {
+            listing = existing;
+            unsigned int usable = 0;
+            unsigned int withoutAnn = 0;
+            unsigned int bestScore = 0xFFFFFFFFU;
+            unsigned int maxDepth = 0;
+            for (const AntIdentityTreeNode& entry : existing)
+            {
+                OwnNode node;
+                memset(&node, 0, sizeof(node));   // nonce stays zero: unused for a node we did not mine
+                node.score = entry.score;
+                node.anchorTick = entry.anchorTick;
+                node.depth = entry.depth;
+                node.parentTick = entry.parentTick;
+                node.parentSolutionIndexInTick = entry.parentSolutionIndexInTick;
+                node.selfTick = entry.selfTick;
+                node.selfSolutionIndexInTick = entry.selfSolutionIndexInTick;
+                node.refKnown = true;
+
+                unsigned char storedLut[CANONICAL_ANN_BYTES];
+                const int result = queryParentAnn(sock, operatorSubseed, operatorPublicKey,
+                    entry.selfTick, entry.selfSolutionIndexInTick, storedLut);
+                if (result < 0)
+                {
+                    printf("WARNING: network failure while adopting the existing tree - adopted %zu of %zu nodes.\n",
+                        ownNodes.size(), existing.size());
+                    break;
+                }
+                if (result == 0)
+                {
+                    // No ANN for a ref the node just listed - the colony moved under us. Keep the
+                    // node so the resolve loop claims its entry, but never extend it.
+                    node.lutChecked = true;
+                    node.lutMismatch = true;
+                    withoutAnn++;
+                }
+                else
+                {
+                    // Came from the node, so there is nothing to verify.
+                    annFromCanonicalLut(*miner, storedLut, rootAnn, node.ann);
+                    node.lutChecked = true;
+                    node.lutMismatch = false;
+                    usable++;
+                    if (entry.score < bestScore)
+                    {
+                        bestScore = entry.score;
+                    }
+                    if (entry.depth > maxDepth)
+                    {
+                        maxDepth = entry.depth;
+                    }
+                }
+                ownNodes.push_back(node);
+            }
+            if (!existing.empty())
+            {
+                printf("Adopted %u existing tree nodes (best score %u, max depth %u)",
+                    usable, usable ? bestScore : 0U, maxDepth);
+                if (withoutAnn)
+                {
+                    printf(", %u without a stored ANN (not extendable)", withoutAnn);
+                }
+                printf("\n");
+            }
+        }
+    }
+
     while (!state)
     {
         // Parent selection: the best own node whose selfRef is known (deepest frontier),
@@ -982,10 +1004,13 @@ int main(int argc, char* argv[])
                     staleSkipped++;
                     continue;
                 }
-                // The mining already guarantees threshold + strictly-beat-parent; only the per-parent
-                // child cap remains. 0 = unbound. Isolated trees: our own submissions are the count.
+                // Threshold and beat-parent are already guaranteed by the mining; only the child
+                // cap is left. 0 = unbound. Counted from the node's listing, which survives a
+                // restart, plus submissions the listing has not caught up with yet. Submitting
+                // over the cap wastes the solution and risks the computor's deposit.
                 if (epochContext.maxChildrenPerParent != 0
-                    && localChildCount(ownNodes, r.parentTick, r.parentSolutionIndexInTick) >= epochContext.maxChildrenPerParent)
+                    && childCountOf(listing, ownNodes, r.parentTick, r.parentSolutionIndexInTick)
+                        >= epochContext.maxChildrenPerParent)
                 {
                     continue;
                 }
@@ -1093,23 +1118,35 @@ int main(int argc, char* argv[])
             lastResolveTime = now;
 
             std::vector<AntIdentityTreeNode> entries;
-            unsigned int fromIndex = 0;
-            bool queryOk = true;
-            do
-            {
-                unsigned int nextIndex = 0;
-                if (!queryIdentityTree(sock, operatorSubseed, operatorPublicKey, computorPublicKey, fromIndex, entries, nextIndex))
-                {
-                    queryOk = false;
-                    break;
-                }
-                fromIndex = nextIndex;
-            } while (fromIndex != 0);
+            const bool queryOk = fetchIdentityTree(sock, operatorSubseed, operatorPublicKey, computorPublicKey, entries);
 
             if (queryOk)
             {
                 listing = entries;
                 unsigned int resolved = 0;
+
+                // A listing entry carries no nonce, so a submission is matched on
+                // (score, anchorTick, depth, parentRef). Two of our hits can share that tuple, so
+                // claim each entry as it binds - a plain first-match would give both the same
+                // selfRef. A swap between equal entries is caught by the LUT check above.
+                std::vector<bool> claimed(entries.size(), false);
+                for (const OwnNode& node : ownNodes)
+                {
+                    if (!node.refKnown)
+                    {
+                        continue;
+                    }
+                    for (size_t e = 0; e < entries.size(); e++)
+                    {
+                        if (entries[e].selfTick == node.selfTick
+                            && entries[e].selfSolutionIndexInTick == node.selfSolutionIndexInTick)
+                        {
+                            claimed[e] = true;
+                            break;
+                        }
+                    }
+                }
+
                 for (OwnNode& node : ownNodes)
                 {
                     if (node.refKnown)
@@ -1117,16 +1154,20 @@ int main(int argc, char* argv[])
                         resolved++;
                         continue;
                     }
-                    // The listing has no identity field; match on (score, anchorTick, depth).
-                    // Unambiguous in a low-traffic validation run.
-                    for (const AntIdentityTreeNode& entry : entries)
+                    for (size_t e = 0; e < entries.size(); e++)
                     {
+                        if (claimed[e])
+                        {
+                            continue;
+                        }
+                        const AntIdentityTreeNode& entry = entries[e];
                         if (entry.score == node.score
                             && entry.anchorTick == node.anchorTick
                             && entry.depth == node.depth
                             && entry.parentTick == node.parentTick
                             && entry.parentSolutionIndexInTick == node.parentSolutionIndexInTick)
                         {
+                            claimed[e] = true;
                             node.refKnown = true;
                             node.selfTick = entry.selfTick;
                             node.selfSolutionIndexInTick = entry.selfSolutionIndexInTick;

@@ -60,7 +60,8 @@ add_executable(ant_tree
 
 target_include_directories(ant_tree
     PRIVATE
-    ${CMAKE_SOURCE_DIR}/src)
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/ant)
 
 target_link_libraries(ant_tree
     PRIVATE
@@ -78,7 +79,8 @@ add_executable(broadcastAntSolution
 
 target_include_directories(broadcastAntSolution
     PRIVATE
-    ${CMAKE_SOURCE_DIR}/src)
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/ant)
 
 target_link_libraries(broadcastAntSolution
     PRIVATE

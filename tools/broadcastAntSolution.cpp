@@ -36,63 +36,13 @@
 #include "keyUtils.h"
 #include "K12AndKeyUtil.h"
 #include "network.h"
-
-// Wire protocol (mirrors core/src/network_messages)
-#define BROADCAST_MESSAGE 1
-#define MESSAGE_TYPE_ANT_SOLUTION 3
-#define REQUEST_CURRENT_TICK_INFO 27
-#define RESPOND_CURRENT_TICK_INFO 28
-#define REQUEST_ANT_IDENTITY_TREE 72
-#define RESPOND_ANT_IDENTITY_TREE 73
-
-static constexpr unsigned int ROOT_TICK = 0U;
-static constexpr unsigned int ROOT_INDEX_IN_TICK = 0xFFFFFFFFU;
+#include "ant_colony_message.h"
 
 // bpp9000 canonical-nonce knobs (core src/mining/score_bpp9000.h):
 // nonce[0] == 1 selects Bpp9000, nonce[1] = L in [1, 10], nonce[2] = K in [0, 100] for ant.
 static constexpr unsigned char ALGO_BPP9000 = 1;
 static constexpr unsigned int MAX_LUT_ENTRIES_PER_STEP = 10;
 static constexpr unsigned int NUMBER_OF_MUTATIONS = 100;
-
-struct RespondCurrentTickInfo
-{
-    unsigned short tickDuration;
-    unsigned short epoch;
-    unsigned int tick;
-    unsigned short numberOfAlignedVotes;
-    unsigned short numberOfMisalignedVotes;
-    unsigned int initialTick;
-};
-static_assert(sizeof(RespondCurrentTickInfo) == 16, "RespondCurrentTickInfo unexpected size");
-
-struct RequestAntIdentityTree
-{
-    unsigned char pubkey[32];
-    unsigned int fromIndex;
-    unsigned int padding;
-};
-static_assert(sizeof(RequestAntIdentityTree) == 40, "RequestAntIdentityTree unexpected size");
-
-struct RespondAntIdentityTreeHeader
-{
-    unsigned int count;
-    unsigned int itemSize;
-    unsigned int nextIndex;
-};
-static_assert(sizeof(RespondAntIdentityTreeHeader) == 12, "RespondAntIdentityTreeHeader unexpected size");
-
-struct AntIdentityTreeNode
-{
-    unsigned int selfTick;
-    unsigned int selfSolutionIndexInTick;
-    unsigned int parentTick;
-    unsigned int parentSolutionIndexInTick;
-    unsigned int score;
-    unsigned int childCount;
-    unsigned int anchorTick;
-    unsigned int depth;
-};
-static_assert(sizeof(AntIdentityTreeNode) == 32, "AntIdentityTreeNode unexpected size");
 
 // --- request/response helpers (from src/AntMiner.cpp) ---
 static int waitForResponse(ServerSocket& sock, unsigned char wantedType, char* payload, unsigned int payloadCapacity)
@@ -243,7 +193,7 @@ static bool submitAntSolution(ServerSocket& sock,
     {
         RequestResponseHeader header;
         Message message;
-        unsigned char payload[48];
+        unsigned char payload[sizeof(AntSolutionBroadcastPayload)];
         unsigned char signature[64];
     } packet;
 
@@ -271,18 +221,19 @@ static bool submitAntSolution(ServerSocket& sock,
         KangarooTwelve(sharedKeyAndGammingNonce, 64, gammingKey, 32);
     } while (gammingKey[0] != MESSAGE_TYPE_ANT_SOLUTION);
 
-    unsigned char plain[48];
-    memcpy(plain, &parentTick, 4);
-    memcpy(plain + 4, &parentSolutionIndexInTick, 4);
-    memcpy(plain + 8, &anchorTick, 4);
-    memcpy(plain + 12, &claimedScore, 4);
-    memcpy(plain + 16, nonce, 32);
+    AntSolutionBroadcastPayload plain;
+    plain.parentTick = parentTick;
+    plain.parentSolutionIndexInTick = parentSolutionIndexInTick;
+    plain.anchorTick = anchorTick;
+    plain.claimedScore = claimedScore;
+    memcpy(plain.nonce, nonce, 32);
 
     unsigned char gamma[sizeof(plain)];
     KangarooTwelve(gammingKey, 32, gamma, sizeof(gamma));
+    const unsigned char* plainBytes = (const unsigned char*)&plain;
     for (unsigned int i = 0; i < sizeof(plain); i++)
     {
-        packet.payload[i] = plain[i] ^ gamma[i];
+        packet.payload[i] = plainBytes[i] ^ gamma[i];
     }
 
     unsigned char digest[32];

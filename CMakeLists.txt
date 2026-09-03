@@ -40,7 +40,13 @@ else()
 endif()
 
 # Ant colony reference miner
-add_executable(AntMiner src/AntMiner.cpp src/keyUtils.cpp)
+add_executable(AntMiner src/ant/AntMiner.cpp src/keyUtils.cpp)
+
+target_include_directories(AntMiner
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/src/ant)
+
 if(WIN32)
     target_compile_definitions(AntMiner PRIVATE NOMINMAX)
     target_link_libraries(AntMiner wsock32 ws2_32)
