@@ -6,6 +6,7 @@
 
 #include "task_file.h"
 #include "K12AndKeyUtil.h"
+#include "bpp9000_params.h"
 
 // Try to read reduced params from task file
 // Its main purpose for the regression test only
@@ -80,7 +81,9 @@ bool readSubviewBlocks(const char* taskFilePath,
     {
         return false;
     }
-    if (N == fileN && M == fileM && T == header.numPairs)
+    // header.dataHash covers the scored region: the production sequenceLength rows. A file may
+    // carry holdout rows beyond them (numPairs > scored length), excluded from the hash.
+    if (N == fileN && M == fileM && T == bpp9000_params::ProdConfig::sequenceLength && header.numPairs >= T)
     {
         KangarooTwelve(fileData.data(), (unsigned int)dataPrefixBytes, hash, task_file::DATA_HASH_SIZE);
         if (memcmp(hash, header.dataHash, task_file::DATA_HASH_SIZE) != 0)

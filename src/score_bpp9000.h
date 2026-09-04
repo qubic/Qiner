@@ -52,6 +52,7 @@ struct Miner
     static constexpr unsigned char TRIT_UNKNOWN = 2;
 
     static constexpr unsigned int INFINITE_ERROR = 0xFFFFFFFFU;
+    static constexpr unsigned int INVALID_SCORE_VALUE = 0xFFFFFFFFU;   // non-canonical ant nonce
 
     static constexpr unsigned long long lutSize = 27;
 
@@ -76,10 +77,21 @@ struct Miner
 
     std::vector<unsigned char> poolVec;
 
+    // The random2 pool the scorer reads. initialize()/initializeFromMemory() point it at the owned
+    // poolVec; setPool() points it at a caller-owned pool shared read-only across threads (the
+    // ant-colony path builds the ~512 MB pool once and shares it).
+    const unsigned char* pRandom2Pool = nullptr;
+
+    void setPool(const unsigned char* pool)
+    {
+        pRandom2Pool = pool;
+    }
+
     bool initialize(unsigned char* miningSeed, const char* taskFilePath)
     {
         poolVec.resize(POOL_VEC_PADDING_SIZE);
         generateRandom2Pool(miningSeed, poolVec.data());
+        pRandom2Pool = poolVec.data();
 
         return loadTaskData(taskFilePath);
     }
@@ -96,7 +108,7 @@ struct Miner
             header.version != task_file::VERSION ||
             header.numInputTrits != numberOfInputNeurons ||
             header.numOutputTrits != numberOfOutputNeurons ||
-            header.numPairs != sequenceLength ||
+            header.numPairs < sequenceLength ||
             header.population != populationThreshold ||
             header.numNeighbors != numberOfNeighbors)
         {
@@ -161,6 +173,7 @@ struct Miner
     {
         poolVec.resize(POOL_VEC_PADDING_SIZE);
         generateRandom2Pool(miningSeed, poolVec.data());
+        pRandom2Pool = poolVec.data();
         return loadTaskFromMemory(topoBlock, dataBlock);
     }
 
@@ -397,8 +410,9 @@ struct Miner
         currentANN.lut[neuronIdx * lutSize + line] = newTrit;
     }
 
-    // Seed the ANN: root LUT from the pubkey alone (each computor's fixed root); mutation seeds from
-    // pubkey+nonce (nonce[0..2] are the algo/L/K knobs, excluded from the RNG). Returns the start score.
+    // Standalone path only: root LUT from the pubkey alone; the ant path derives the shared epoch
+    // root via deriveRootANN(rootSeed) instead. Mutation seeds from pubkey+nonce (nonce[0..2] are
+    // the algo/L/K knobs, excluded from the RNG). Returns the start score.
     unsigned int initializeANN(unsigned char* publicKey, unsigned char* nonce)
     {
         const unsigned long long population = populationThreshold;
@@ -406,7 +420,7 @@ struct Miner
 
         unsigned char rootHash[32];
         KangarooTwelve(publicKey, 32, rootHash, 32);
-        random2(rootHash, poolVec.data(), (unsigned char*)&initValue.lutInit, sizeof(initValue.lutInit));
+        random2(rootHash, pRandom2Pool, (unsigned char*)&initValue.lutInit, sizeof(initValue.lutInit));
 
         unsigned char searchHash[32];
         unsigned char combined[64];
@@ -416,7 +430,7 @@ struct Miner
         combined[33] = 0;
         combined[34] = 0;
         KangarooTwelve(combined, 64, searchHash, 32);
-        random2(searchHash, poolVec.data(), (unsigned char*)&initValue.mutationSeed, sizeof(initValue.mutationSeed));
+        random2(searchHash, pRandom2Pool, (unsigned char*)&initValue.mutationSeed, sizeof(initValue.mutationSeed));
 
         for (unsigned long long i = 0; i < population; ++i)
         {
@@ -435,9 +449,27 @@ struct Miner
         return score();
     }
 
-    // Anti-attractor search: L mutations/step; accept worse-or-equal for the first K steps (explore),
-    // then better-or-equal (exploit); one-step rollback; keep and return the best score found.
+    // Standalone solo score: root network from the pubkey, explore disabled (K = 0). L = nonce[1]
+    // clamped to [1, MAX_LUT_ENTRIES_PER_STEP]; nonce[0] and nonce[2] do not affect this path.
     unsigned int computeScore(unsigned char* publicKey, unsigned char* nonce)
+    {
+        const unsigned int L = lutEntriesPerStep(nonce);
+        const unsigned int cur = initializeANN(publicKey, nonce);
+        return computeScoreFromCurrent(L, 0, cur);
+    }
+
+    bool findSolution(unsigned char* publicKey, unsigned char* nonce, unsigned int& outScore)
+    {
+        outScore = computeScore(publicKey, nonce);
+        return outScore <= solutionThreshold;
+    }
+
+    // ---- Ant colony seam ---------------------------------------------------------------------------
+    // Ported from core/src/mining/score_bpp9000.h. Scores here are bit-identical to the node's, which
+    // is what makes ant-colony solutions acceptable. Shares pRandom2Pool, score(), mutate() and the
+    // trit arithmetic with the solo path above.
+
+    static unsigned int lutEntriesPerStep(const unsigned char* nonce)
     {
         unsigned int L = nonce[1];
         if (L < 1)
@@ -448,13 +480,17 @@ struct Miner
         {
             L = MAX_LUT_ENTRIES_PER_STEP;
         }
+        return L;
+    }
 
-        // Pre-ant-colony phase, the anti-attractor (explore) is disabled. nonce[2] is temporarily unused here.
-        const unsigned long long K = 0;
-
-        unsigned int cur = initializeANN(publicKey, nonce);
-        memcpy(&bestANN, &currentANN, sizeof(bestANN));
+    // Anti-attractor walk from the LUT already in currentANN: L mutations/step; accept worse-or-equal
+    // for the first K steps (explore), then better-or-equal (exploit); one-step rollback. Returns the
+    // best score found and leaves the LUT that produced it in bestANN.
+    unsigned int computeScoreFromCurrent(unsigned int L, unsigned long long K, unsigned int startScore)
+    {
+        unsigned int cur = startScore;
         unsigned int best = cur;
+        memcpy(&bestANN, &currentANN, sizeof(bestANN));
 
         for (unsigned long long s = 0; s < numberOfMutations; ++s)
         {
@@ -495,10 +531,85 @@ struct Miner
         return best;
     }
 
-    bool findSolution(unsigned char* publicKey, unsigned char* nonce, unsigned int& outScore)
+    static bool isCanonicalAntNonce(const unsigned char* nonce)
     {
-        outScore = computeScore(publicKey, nonce);
-        return outScore <= solutionThreshold;
+        return (nonce[0] == 1)                             // AlgoType::Bpp9000
+            && (nonce[1] >= 1)
+            && (nonce[1] <= MAX_LUT_ENTRIES_PER_STEP)
+            && (nonce[2] <= numberOfMutations);
+    }
+
+    // Set every neuron's role/value and copy a LUT into currentANN, ready to score.
+    void loadLutIntoCurrent(const unsigned char* lut)
+    {
+        for (unsigned long long i = 0; i < populationThreshold; ++i)
+        {
+            currentANN.neurons[i].type = neuronTypes[i];
+            currentANN.neurons[i].value = TRIT_UNKNOWN;
+        }
+        memcpy(currentANN.lut, lut, maxNumberOfNeurons * lutSize);
+    }
+
+    // Mutation-walk seeds. When anchorTickDigest != nullptr the walk is bound to that anchor (the
+    // ant-colony case); nonce[0..2] are the algo/L/K knobs and stay out of the RNG.
+    void deriveAntMutationSeeds(const unsigned char* publicKey, const unsigned char* nonce,
+        const unsigned char* anchorTickDigest)
+    {
+        unsigned char searchHash[32];
+        unsigned char combined[96];
+        memcpy(combined, publicKey, 32);
+        memcpy(combined + 32, nonce, 32);
+        combined[32] = 0;
+        combined[33] = 0;
+        combined[34] = 0;
+        unsigned int combinedSize = 64;
+        if (anchorTickDigest != nullptr)
+        {
+            memcpy(combined + 64, anchorTickDigest, 32);
+            combinedSize = 96;
+        }
+        KangarooTwelve(combined, combinedSize, searchHash, 32);
+        random2(searchHash, pRandom2Pool, (unsigned char*)&initValue.mutationSeed, sizeof(initValue.mutationSeed));
+    }
+
+    // The shared per-epoch root network: root LUT from the epoch-start spectrum digest, identical
+    // for every identity, written into a caller-owned ANN.
+    void deriveRootANN(const unsigned char* rootSeed, ANN& out)
+    {
+        unsigned char rootHash[32];
+        KangarooTwelve(rootSeed, 32, rootHash, 32);
+        random2(rootHash, pRandom2Pool, (unsigned char*)&initValue.lutInit, sizeof(initValue.lutInit));
+
+        for (unsigned long long i = 0; i < populationThreshold; ++i)
+        {
+            out.neurons[i].type = neuronTypes[i];
+            out.neurons[i].value = TRIT_UNKNOWN;
+        }
+        for (unsigned long long n = 0; n < populationThreshold; ++n)
+        {
+            for (unsigned long long line = 0; line < lutSize; ++line)
+            {
+                out.lut[n * lutSize + line] = (unsigned char)(initValue.lutInit[n * lutSize + line] % 3);
+            }
+        }
+    }
+
+    // Score a child by inheriting the parent's LUT and walking it with the child's own anchored seeds.
+    // parentLut is the 1728-byte canonical LUT (from deriveRootANN().lut or a fetched parent node).
+    unsigned int computeScoreFromParent(const unsigned char* parentLut, const unsigned char* publicKey,
+        const unsigned char* nonce, const unsigned char* anchorTickDigest)
+    {
+        if (!isCanonicalAntNonce(nonce))
+        {
+            return INVALID_SCORE_VALUE;
+        }
+        loadLutIntoCurrent(parentLut);
+        deriveAntMutationSeeds(publicKey, nonce, anchorTickDigest);
+
+        const unsigned int L = lutEntriesPerStep(nonce);
+        const unsigned long long K = nonce[2];
+        const unsigned int cur = score();
+        return computeScoreFromCurrent(L, K, cur);
     }
 };
 

@@ -47,7 +47,8 @@ struct TaskFileHeader
     unsigned int population;         // P, ANN neuron count
     unsigned int numNeighbors;       // K, LUT fan-in (neighbours per neuron)
     unsigned char topologyHash[DATA_HASH_SIZE];  // hash of the topology block
-    unsigned char dataHash[DATA_HASH_SIZE];      // hash of the (packed) data block
+    // Hash of the packed data block's SCORED region
+    unsigned char dataHash[DATA_HASH_SIZE];
 };
 #pragma pack(pop)
 
