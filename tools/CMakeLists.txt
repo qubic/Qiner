@@ -90,3 +90,6 @@ if(WIN32)
     target_compile_definitions(broadcastAntSolution PRIVATE NOMINMAX)
     target_link_libraries(broadcastAntSolution PRIVATE wsock32 ws2_32)
 endif()
+
+# Offline pre-epoch topology mining
+add_subdirectory(topo_miner)
