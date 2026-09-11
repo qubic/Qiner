@@ -32,7 +32,12 @@
 //
 // Usage:
 //   bpp9000_ground_truth [task=bpp9000.task] [numSamples=16] [out.csv] [miningSeedHex|random] [numThreads=hw]
-//                        [--ant] [--depth N]
+//                        [--ant] [--depth N] [--lut-only] [--hybrid]
+//
+// --lut-only: the walk mutates the LUT (default mutates the wiring). Used to cross-check against the old
+// LUT-mining goldens; the default (wiring) mode generates the new goldens.
+// --hybrid: the walk mutates both the wiring and the LUT each step (L changes to each). Generates the
+// hybrid goldens; takes precedence over --lut-only.
 //
 // Solo mode (default): writes "pubkey, nonce, miningseed, score" from computeScore.
 // Ant mode (--ant): numSamples = number of chains; each chain is a lineage of --depth nodes (default 2)
@@ -104,6 +109,8 @@ int main(int argc, char** argv)
     std::vector<const char*> pos;
     bool antMode = false;
     bool skipTimeouts = false;
+    bool lutOnly = false;   // default: mutate the wiring; --lut-only mutates the LUT (reproduces LUT-mining)
+    bool hybridMode = false;   // --hybrid: mutate both the wiring and the LUT each step
     int depth = 2;
     for (int i = 1; i < argc; ++i)
     {
@@ -114,6 +121,14 @@ int main(int argc, char** argv)
         else if (strcmp(argv[i], "--skip-timeouts") == 0)
         {
             skipTimeouts = true;
+        }
+        else if (strcmp(argv[i], "--lut-only") == 0)
+        {
+            lutOnly = true;
+        }
+        else if (strcmp(argv[i], "--hybrid") == 0)
+        {
+            hybridMode = true;
         }
         else if (strcmp(argv[i], "--depth") == 0 && i + 1 < argc)
         {
@@ -191,7 +206,7 @@ int main(int argc, char** argv)
                 unsigned char* anchor = &chains[(size_t)c].anchors[(size_t)d * 32];
                 bpp9000_synth::fillRandom(nonce, 32);
                 nonce[0] = 1;                                                                          // AlgoType::Bpp9000
-                nonce[1] = (unsigned char)((nonce[1] % score_bpp9000::MAX_LUT_ENTRIES_PER_STEP) + 1);  // L in [1, 10]
+                nonce[1] = (unsigned char)((nonce[1] % score_bpp9000::MAX_CHANGES_PER_STEP) + 1);  // L in [1, 10]
                 nonce[2] = (unsigned char)(nonce[2] % (score_bpp9000::NUMBER_OF_MUTATIONS + 1));        // K in [0, 100]
                 bpp9000_synth::fillRandom(anchor, 32);
             }
@@ -236,6 +251,8 @@ int main(int argc, char** argv)
                 delete miner;
                 return;
             }
+            miner->mutateWiringEnabled = hybridMode || !lutOnly;
+            miner->mutateLutEnabled = hybridMode || lutOnly;
             unsigned char pub[32];
             std::vector<unsigned char> nonces((size_t)depth * 32);
             std::vector<unsigned char> anchors((size_t)depth * 32);
@@ -254,7 +271,7 @@ int main(int argc, char** argv)
                             unsigned char* anchor = &anchors[(size_t)d * 32];
                             bpp9000_synth::fillRandom(nonce, 32);
                             nonce[0] = 1;                                                                          // AlgoType::Bpp9000
-                            nonce[1] = (unsigned char)((nonce[1] % score_bpp9000::MAX_LUT_ENTRIES_PER_STEP) + 1);  // L in [1, 10]
+                            nonce[1] = (unsigned char)((nonce[1] % score_bpp9000::MAX_CHANGES_PER_STEP) + 1);  // L in [1, 10]
                             nonce[2] = (unsigned char)(nonce[2] % (score_bpp9000::NUMBER_OF_MUTATIONS + 1));        // K in [0, 100]
                             bpp9000_synth::fillRandom(anchor, 32);
                         }
@@ -273,7 +290,7 @@ int main(int argc, char** argv)
                     bool anyInfinite = false;
                     for (int d = 0; d < depth; ++d)
                     {
-                        scores[(size_t)d] = miner->computeScoreFromParent(parentAnn.lut, pub, &nonces[(size_t)d * 32], &anchors[(size_t)d * 32]);
+                        scores[(size_t)d] = miner->computeScoreFromParent(parentAnn, pub, &nonces[(size_t)d * 32], &anchors[(size_t)d * 32]);
                         if (scores[(size_t)d] == ProdMiner::INFINITE_ERROR)
                         {
                             anyInfinite = true;
@@ -282,8 +299,8 @@ int main(int argc, char** argv)
                                 break;   // doomed lineage - stop scoring the rest, draw a fresh one
                             }
                         }
-                        // This node becomes the next level's parent (its stored canonical LUT = bestANN).
-                        memcpy(parentAnn.lut, miner->bestANN.lut, sizeof(parentAnn.lut));
+                        // This node becomes the next level's parent (its best wiring + LUT).
+                        miner->getBestANN(parentAnn);
                     }
 
                     if (skipTimeouts && anyInfinite)
@@ -395,6 +412,8 @@ int main(int argc, char** argv)
             delete miner;
             return;
         }
+        miner->mutateWiringEnabled = hybridMode || !lutOnly;
+        miner->mutateLutEnabled = hybridMode || lutOnly;
         for (size_t i = (size_t)tid; i < n; i += (size_t)threads)
         {
             unsigned char pub[32];

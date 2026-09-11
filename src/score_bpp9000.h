@@ -19,7 +19,12 @@ static constexpr unsigned long long NUMBER_OF_NEIGHBORS = 3;
 static constexpr unsigned long long NUMBER_OF_MUTATIONS = 100;
 static constexpr unsigned long long MAX_NUMBER_OF_TICKS = 100000;
 
-static constexpr unsigned int MAX_LUT_ENTRIES_PER_STEP = 10;
+static constexpr unsigned int MAX_CHANGES_PER_STEP = 10;
+
+// Mining mode: which of the wiring and the LUT the walk mutates (both true = hybrid).
+static constexpr bool BPP9000_MUTATE_WIRING = true;
+static constexpr bool BPP9000_MUTATE_LUT = false;
+
 static constexpr unsigned long long SEQUENCE_LENGTH = 24 * 365;
 static constexpr unsigned long long WINDOW_WIDTH = 24 * 28;
 static constexpr unsigned long long NUMBER_OF_WINDOWS = SEQUENCE_LENGTH - WINDOW_WIDTH;
@@ -42,6 +47,9 @@ struct Miner
 {
     static constexpr unsigned long long maxNumberOfNeurons = populationThreshold;
     static constexpr unsigned long long numberOfWindows = sequenceLength - windowWidth;
+
+    // Number of directed links (the wiring half of the ANN): one index per neuron neighbour slot.
+    static constexpr unsigned long long numberOfLinks = populationThreshold * numberOfNeighbors;
 
     static constexpr unsigned long long topoBlockSize =
         (numberOfInputNeurons + numberOfOutputNeurons + 1 + populationThreshold * numberOfNeighbors) * sizeof(uint32_t);
@@ -147,6 +155,8 @@ struct Miner
             return false;
         }
 
+        // The task-file wiring is the shared root every walk evolves links away from.
+        memcpy(rootNeighborIndices, neighborIndices, sizeof(rootNeighborIndices));
         deriveNeuronRoles();
         return true;
     }
@@ -165,6 +175,8 @@ struct Miner
         {
             return false;
         }
+        // The task-file wiring is the shared root every walk evolves links away from.
+        memcpy(rootNeighborIndices, neighborIndices, sizeof(rootNeighborIndices));
         deriveNeuronRoles();
         return true;
     }
@@ -275,24 +287,51 @@ struct Miner
         unsigned char value;
     };
 
-    struct ANN
+    // The internal working state: per-neuron scratch (type/value) + the working LUT.
+    struct InternalANN
     {
         Neuron neurons[maxNumberOfNeurons];
         unsigned char lut[maxNumberOfNeurons * lutSize];
     };
-    ANN bestANN;
-    ANN currentANN;
-    ANN prevANN;
+    // currentANN holds the working LUT and scratch neuron state; the walk mutates the wiring and/or the LUT.
+    InternalANN currentANN;
+
+    // The exchanged form: what a child inherits from its parent and what is sent in node-miner messages
+    // (the parent-ANN response). Neighbour wiring (one uint16 index per link, so the format holds any
+    // population up to 65536) + the LUT (one trit per byte, dense by updated-neuron position, matching the node).
+    static_assert(populationThreshold <= 65536, "ANN.neighbor is a 16-bit transfer index");
+    struct ANN
+    {
+        unsigned short neighbor[numberOfLinks];
+        unsigned char lut[maxNumberOfNeurons * lutSize];
+    };
+
+    // What the walk mutates: wiring, LUT, or both. Defaults from the mode constants above; the tool overrides per run.
+    bool mutateWiringEnabled = BPP9000_MUTATE_WIRING;
+    bool mutateLutEnabled = BPP9000_MUTATE_LUT;
+
+    static constexpr unsigned long long mutationSeedCount = numberOfMutations * MAX_CHANGES_PER_STEP;
+    // The mutation-seed array is two halves of mutationSeedCount: the first drives the wiring, the second the LUT (hybrid).
+    static_assert((2 * mutationSeedCount * sizeof(unsigned long long)) % 64 == 0, "mutation-seed draw must be 64-byte aligned for random2");
 
     struct InitValue
     {
         unsigned char lutInit[maxNumberOfNeurons * lutSize];
-        unsigned long long mutationSeed[numberOfMutations * MAX_LUT_ENTRIES_PER_STEP];
+        unsigned long long mutationSeed[2 * mutationSeedCount];
     } initValue;
 
     unsigned char nextNeuronValue[maxNumberOfNeurons];
 
-    uint32_t neighborIndices[populationThreshold * numberOfNeighbors];
+    // Live wiring the score reads and the walk mutates. rootNeighborIndices is the pristine task-file
+    // topology every walk starts from; prev/best are the walk's rollback and best-so-far snapshots.
+    uint32_t neighborIndices[numberOfLinks];
+    uint32_t rootNeighborIndices[numberOfLinks];
+    uint32_t prevNeighborIndices[numberOfLinks];
+    uint32_t bestNeighborIndices[numberOfLinks];
+
+    // LUT rollback and best-so-far snapshots (parallel to the wiring ones).
+    unsigned char prevLut[maxNumberOfNeurons * lutSize];
+    unsigned char bestLut[maxNumberOfNeurons * lutSize];
 
     uint32_t inputNeuronIndices[numberOfInputNeurons];
     uint32_t outputNeuronIndices[numberOfOutputNeurons];
@@ -395,32 +434,65 @@ struct Miner
         return numberOfFailures;
     }
 
-    // Flip one LUT entry of one non-input neuron (bit 0 picks the new trit, the rest picks the line).
-    void mutate(unsigned long long mutationSeed)
+    // Rewire one neighbour link to a different target (self-loops and duplicates allowed; only the previous
+    // target is excluded, and target < populationThreshold, so the wiring stays valid).
+    void mutateWiring(unsigned long long mutationSeed)
+    {
+        const unsigned long long flatSlot = mutationSeed % numberOfLinks;
+        unsigned int target = (unsigned int)((mutationSeed / numberOfLinks) % populationThreshold);
+        const unsigned int previous = neighborIndices[flatSlot];
+        while (target == previous)
+        {
+            target = (unsigned int)((target + 1) % populationThreshold);
+        }
+        neighborIndices[flatSlot] = target;
+    }
+
+    // Flip one LUT entry of one updated neuron (bit 0 picks the new trit, the rest picks the dense line).
+    void mutateLut(unsigned long long mutationSeed)
     {
         const unsigned long long delta = mutationSeed & 1ULL;
-
         const unsigned long long totalLines = numberOfUpdatedNeurons * lutSize;
         const unsigned long long flatIdx = (mutationSeed >> 1) % totalLines;
         const unsigned long long neuronIdx = updatedNeuronIndices[flatIdx / lutSize];
         const unsigned long long line = flatIdx % lutSize;
-
         const unsigned char oldTrit = currentANN.lut[neuronIdx * lutSize + line];
-        const unsigned char newTrit = (unsigned char)((oldTrit + 1 + delta) % 3);
-        currentANN.lut[neuronIdx * lutSize + line] = newTrit;
+        currentANN.lut[neuronIdx * lutSize + line] = (unsigned char)((oldTrit + 1 + delta) % 3);
     }
 
-    // Standalone path only: root LUT from the pubkey alone; the ant path derives the shared epoch
-    // root via deriveRootANN(rootSeed) instead. Mutation seeds from pubkey+nonce (nonce[0..2] are
-    // the algo/L/K knobs, excluded from the RNG). Returns the start score.
+    // Derive the root LUT material from a 32-byte seed: the pubkey for the standalone path, or the shared
+    // spectrum digest for the ant root so every identity derives the identical root LUT.
+    void deriveRootLut(const unsigned char* seed)
+    {
+        unsigned char rootHash[32];
+        KangarooTwelve(seed, 32, rootHash, 32);
+        random2(rootHash, pRandom2Pool, (unsigned char*)&initValue.lutInit, sizeof(initValue.lutInit));
+    }
+
+    // Set every neuron's role/value and copy the root LUT into currentANN, ready to score.
+    void applyRootLut()
+    {
+        for (unsigned long long i = 0; i < populationThreshold; ++i)
+        {
+            currentANN.neurons[i].type = neuronTypes[i];
+            currentANN.neurons[i].value = TRIT_UNKNOWN;
+        }
+        for (unsigned long long n = 0; n < populationThreshold; ++n)
+        {
+            for (unsigned long long line = 0; line < lutSize; ++line)
+            {
+                currentANN.lut[n * lutSize + line] = (unsigned char)(initValue.lutInit[n * lutSize + line] % 3);
+            }
+        }
+    }
+
+    // ---- standadlone seam ---------------------------------------------------------------------------
+    // Standalone path: root LUT from the pubkey, start from the shared task-file root wiring, then walk
+    // with seeds from pubkey+nonce (nonce[0..2] are the algo/L/K knobs, excluded from the RNG).
+    // Returns the start score.
     unsigned int initializeANN(unsigned char* publicKey, unsigned char* nonce)
     {
-        const unsigned long long population = populationThreshold;
-        Neuron* neurons = currentANN.neurons;
-
-        unsigned char rootHash[32];
-        KangarooTwelve(publicKey, 32, rootHash, 32);
-        random2(rootHash, pRandom2Pool, (unsigned char*)&initValue.lutInit, sizeof(initValue.lutInit));
+        deriveRootLut(publicKey);
 
         unsigned char searchHash[32];
         unsigned char combined[64];
@@ -432,28 +504,17 @@ struct Miner
         KangarooTwelve(combined, 64, searchHash, 32);
         random2(searchHash, pRandom2Pool, (unsigned char*)&initValue.mutationSeed, sizeof(initValue.mutationSeed));
 
-        for (unsigned long long i = 0; i < population; ++i)
-        {
-            neurons[i].type = neuronTypes[i];
-            neurons[i].value = TRIT_UNKNOWN;
-        }
-
-        for (unsigned long long n = 0; n < population; ++n)
-        {
-            for (unsigned long long line = 0; line < lutSize; ++line)
-            {
-                currentANN.lut[n * lutSize + line] = (unsigned char)(initValue.lutInit[n * lutSize + line] % 3);
-            }
-        }
+        memcpy(neighborIndices, rootNeighborIndices, sizeof(neighborIndices));
+        applyRootLut();
 
         return score();
     }
 
     // Standalone solo score: root network from the pubkey, explore disabled (K = 0). L = nonce[1]
-    // clamped to [1, MAX_LUT_ENTRIES_PER_STEP]; nonce[0] and nonce[2] do not affect this path.
+    // clamped to [1, MAX_CHANGES_PER_STEP]; nonce[0] and nonce[2] do not affect this path.
     unsigned int computeScore(unsigned char* publicKey, unsigned char* nonce)
     {
-        const unsigned int L = lutEntriesPerStep(nonce);
+        const unsigned int L = changesPerStep(nonce);
         const unsigned int cur = initializeANN(publicKey, nonce);
         return computeScoreFromCurrent(L, 0, cur);
     }
@@ -466,39 +527,53 @@ struct Miner
 
     // ---- Ant colony seam ---------------------------------------------------------------------------
     // Ported from core/src/mining/score_bpp9000.h. Scores here are bit-identical to the node's, which
-    // is what makes ant-colony solutions acceptable. Shares pRandom2Pool, score(), mutate() and the
-    // trit arithmetic with the solo path above.
+    // is what makes ant-colony solutions acceptable. Shares pRandom2Pool, score(), the mutation helpers
+    // and the trit arithmetic with the solo path above.
 
-    static unsigned int lutEntriesPerStep(const unsigned char* nonce)
+    static unsigned int changesPerStep(const unsigned char* nonce)
     {
         unsigned int L = nonce[1];
         if (L < 1)
         {
             L = 1;
         }
-        if (L > MAX_LUT_ENTRIES_PER_STEP)
+        if (L > MAX_CHANGES_PER_STEP)
         {
-            L = MAX_LUT_ENTRIES_PER_STEP;
+            L = MAX_CHANGES_PER_STEP;
         }
         return L;
     }
 
-    // Anti-attractor walk from the LUT already in currentANN: L mutations/step; accept worse-or-equal
-    // for the first K steps (explore), then better-or-equal (exploit); one-step rollback. Returns the
-    // best score found and leaves the LUT that produced it in bestANN.
+    // Anti-attractor walk: L mutations/step; accept worse-or-equal for the first K steps (explore), then
+    // better-or-equal (exploit); one-step rollback of both wiring and LUT. Returns the best score found and
+    // leaves the wiring+LUT that produced it in best*.
     unsigned int computeScoreFromCurrent(unsigned int L, unsigned long long K, unsigned int startScore)
     {
         unsigned int cur = startScore;
         unsigned int best = cur;
-        memcpy(&bestANN, &currentANN, sizeof(bestANN));
+        memcpy(bestNeighborIndices, neighborIndices, sizeof(bestNeighborIndices));
+        memcpy(bestLut, currentANN.lut, sizeof(bestLut));
 
         for (unsigned long long s = 0; s < numberOfMutations; ++s)
         {
-            memcpy(&prevANN, &currentANN, sizeof(prevANN));
+            memcpy(prevNeighborIndices, neighborIndices, sizeof(prevNeighborIndices));
+            memcpy(prevLut, currentANN.lut, sizeof(prevLut));
 
-            for (unsigned int i = 0; i < L; ++i)
+            if (mutateWiringEnabled)
             {
-                mutate(initValue.mutationSeed[s * MAX_LUT_ENTRIES_PER_STEP + i]);
+                for (unsigned int i = 0; i < L; ++i)
+                {
+                    mutateWiring(initValue.mutationSeed[s * MAX_CHANGES_PER_STEP + i]);
+                }
+            }
+            if (mutateLutEnabled)
+            {
+                // Hybrid takes the LUT changes from the second half; lut-only reuses the first half (bit-exact with the LUT-only walk).
+                const unsigned long long lutBase = mutateWiringEnabled ? mutationSeedCount : 0;
+                for (unsigned int i = 0; i < L; ++i)
+                {
+                    mutateLut(initValue.mutationSeed[lutBase + s * MAX_CHANGES_PER_STEP + i]);
+                }
             }
 
             const unsigned int r = score();
@@ -519,13 +594,15 @@ struct Miner
             }
             else
             {
-                memcpy(&currentANN, &prevANN, sizeof(currentANN));
+                memcpy(neighborIndices, prevNeighborIndices, sizeof(neighborIndices));
+                memcpy(currentANN.lut, prevLut, sizeof(prevLut));
             }
 
             if (cur < best)
             {
                 best = cur;
-                memcpy(&bestANN, &currentANN, sizeof(bestANN));
+                memcpy(bestNeighborIndices, neighborIndices, sizeof(bestNeighborIndices));
+                memcpy(bestLut, currentANN.lut, sizeof(bestLut));
             }
         }
         return best;
@@ -535,19 +612,57 @@ struct Miner
     {
         return (nonce[0] == 1)                             // AlgoType::Bpp9000
             && (nonce[1] >= 1)
-            && (nonce[1] <= MAX_LUT_ENTRIES_PER_STEP)
+            && (nonce[1] <= MAX_CHANGES_PER_STEP)
             && (nonce[2] <= numberOfMutations);
     }
 
-    // Set every neuron's role/value and copy a LUT into currentANN, ready to score.
-    void loadLutIntoCurrent(const unsigned char* lut)
+    // Pack the absolute-by-neuron LUT into the dense exchanged form (row k holds neuron updatedNeuronIndices[k], zero tail), matching the node.
+    void packDenseLut(const unsigned char* absLut, unsigned char* denseOut) const
     {
+        memset(denseOut, 0, maxNumberOfNeurons * lutSize);
+        for (unsigned long long k = 0; k < numberOfUpdatedNeurons; ++k)
+        {
+            memcpy(denseOut + k * lutSize, absLut + updatedNeuronIndices[k] * lutSize, lutSize);
+        }
+    }
+
+    // Working state (wiring + LUT) -> ANN; and ANN -> working state (also sets neuron roles/values).
+    void compact(ANN& out) const
+    {
+        for (unsigned long long i = 0; i < numberOfLinks; ++i)
+        {
+            out.neighbor[i] = (unsigned short)neighborIndices[i];
+        }
+        packDenseLut(currentANN.lut, out.lut);
+    }
+
+    void expand(const ANN& src)
+    {
+        for (unsigned long long i = 0; i < numberOfLinks; ++i)
+        {
+            neighborIndices[i] = src.neighbor[i];
+        }
         for (unsigned long long i = 0; i < populationThreshold; ++i)
         {
             currentANN.neurons[i].type = neuronTypes[i];
             currentANN.neurons[i].value = TRIT_UNKNOWN;
         }
-        memcpy(currentANN.lut, lut, maxNumberOfNeurons * lutSize);
+        // Scatter the dense exchanged LUT back to absolute-by-neuron rows; input-neuron rows stay zero.
+        memset(currentANN.lut, 0, sizeof(currentANN.lut));
+        for (unsigned long long k = 0; k < numberOfUpdatedNeurons; ++k)
+        {
+            memcpy(currentANN.lut + updatedNeuronIndices[k] * lutSize, src.lut + k * lutSize, lutSize);
+        }
+    }
+
+    // The wiring + LUT behind the score the last walk returned.
+    void getBestANN(ANN& out) const
+    {
+        for (unsigned long long i = 0; i < numberOfLinks; ++i)
+        {
+            out.neighbor[i] = (unsigned short)bestNeighborIndices[i];
+        }
+        packDenseLut(bestLut, out.lut);
     }
 
     // Mutation-walk seeds. When anchorTickDigest != nullptr the walk is bound to that anchor (the
@@ -572,41 +687,32 @@ struct Miner
         random2(searchHash, pRandom2Pool, (unsigned char*)&initValue.mutationSeed, sizeof(initValue.mutationSeed));
     }
 
-    // The shared per-epoch root network: root LUT from the epoch-start spectrum digest, identical
-    // for every identity, written into a caller-owned ANN.
+    // The shared per-epoch root network: the task-file root wiring plus the root LUT from rootSeed, into a
+    // caller-owned ANN, identical for every identity.
     void deriveRootANN(const unsigned char* rootSeed, ANN& out)
     {
-        unsigned char rootHash[32];
-        KangarooTwelve(rootSeed, 32, rootHash, 32);
-        random2(rootHash, pRandom2Pool, (unsigned char*)&initValue.lutInit, sizeof(initValue.lutInit));
-
-        for (unsigned long long i = 0; i < populationThreshold; ++i)
-        {
-            out.neurons[i].type = neuronTypes[i];
-            out.neurons[i].value = TRIT_UNKNOWN;
-        }
-        for (unsigned long long n = 0; n < populationThreshold; ++n)
-        {
-            for (unsigned long long line = 0; line < lutSize; ++line)
-            {
-                out.lut[n * lutSize + line] = (unsigned char)(initValue.lutInit[n * lutSize + line] % 3);
-            }
-        }
+        deriveRootLut(rootSeed);
+        memcpy(neighborIndices, rootNeighborIndices, sizeof(neighborIndices));
+        applyRootLut();
+        compact(out);
     }
 
-    // Score a child by inheriting the parent's LUT and walking it with the child's own anchored seeds.
-    // parentLut is the 1728-byte canonical LUT (from deriveRootANN().lut or a fetched parent node).
-    unsigned int computeScoreFromParent(const unsigned char* parentLut, const unsigned char* publicKey,
+    // Score a child by inheriting the parent's wiring AND LUT, walking with the child's own anchored seeds.
+    unsigned int computeScoreFromParent(const ANN& parent, const unsigned char* publicKey,
         const unsigned char* nonce, const unsigned char* anchorTickDigest)
     {
         if (!isCanonicalAntNonce(nonce))
         {
             return INVALID_SCORE_VALUE;
         }
-        loadLutIntoCurrent(parentLut);
+        expand(parent);
+        if (!validateTopology())
+        {
+            return INVALID_SCORE_VALUE;
+        }
         deriveAntMutationSeeds(publicKey, nonce, anchorTickDigest);
 
-        const unsigned int L = lutEntriesPerStep(nonce);
+        const unsigned int L = changesPerStep(nonce);
         const unsigned long long K = nonce[2];
         const unsigned int cur = score();
         return computeScoreFromCurrent(L, K, cur);

@@ -308,15 +308,13 @@ static bool fetchIdentityTree(ServerSocket& sock, const unsigned char* signingSu
     return true;
 }
 
-// The node's canonical ANN wire form: LUT rows only, row k = neuron updatedNeuronIndices[k]
-// (dense by updated-neuron position). This miner's ANN struct carries neuron states and keeps LUT
-// rows at absolute neuron indices, so wire bytes and local bytes are never comparable directly.
-static constexpr unsigned long long CANONICAL_ANN_BYTES = AntMinerT::maxNumberOfNeurons * AntMinerT::lutSize;
+// The parent-ANN wire form is the full ANN struct (wiring + dense LUT), byte-identical to the node's
+// stored form, so the miner carries and compares it directly.
 
-// Fetch one stored node's canonical ANN LUT back from the node (Operator signed message).
-// Returns 1 with outCanonicalLut filled, 0 when the node answered without a usable ANN, -1 on network failure
+// Fetch one stored node's ANN back from the node (Operator signed message).
+// Returns 1 with outAnn filled, 0 when the node answered without a usable ANN, -1 on network failure
 static int queryParentAnn(ServerSocket& sock, const unsigned char* operatorSubseed, const unsigned char* operatorPublicKey,
-    unsigned int refTick, unsigned int refSolutionIndexInTick, unsigned char* outCanonicalLut)
+    unsigned int refTick, unsigned int refSolutionIndexInTick, AntMinerT::ANN& outAnn)
 {
     struct
     {
@@ -338,7 +336,7 @@ static int queryParentAnn(ServerSocket& sock, const unsigned char* operatorSubse
     {
         return -1;
     }
-    char buffer[sizeof(RespondAntParentAnnHeader) + CANONICAL_ANN_BYTES];
+    char buffer[sizeof(RespondAntParentAnnHeader) + sizeof(AntMinerT::ANN)];
     const int received = waitForResponse(sock, RESPOND_ANT_PARENT_ANN, buffer, sizeof(buffer));
     if (received < (int)sizeof(RespondAntParentAnnHeader))
     {
@@ -346,40 +344,13 @@ static int queryParentAnn(ServerSocket& sock, const unsigned char* operatorSubse
     }
     const RespondAntParentAnnHeader* respHeader = (const RespondAntParentAnnHeader*)buffer;
     if (respHeader->status != ANT_PARENT_ANN_STATUS_OK
-        || respHeader->annSizeBytes != CANONICAL_ANN_BYTES
-        || received < (int)(sizeof(RespondAntParentAnnHeader) + CANONICAL_ANN_BYTES))
+        || respHeader->annSizeBytes != sizeof(AntMinerT::ANN)
+        || received < (int)(sizeof(RespondAntParentAnnHeader) + sizeof(AntMinerT::ANN)))
     {
         return 0;
     }
-    memcpy(outCanonicalLut, buffer + sizeof(RespondAntParentAnnHeader), CANONICAL_ANN_BYTES);
+    memcpy(&outAnn, buffer + sizeof(RespondAntParentAnnHeader), sizeof(AntMinerT::ANN));
     return 1;
-}
-
-// Compare this miner's neuron-indexed LUT rows against the node's canonical bytes through the
-// updated-neuron mapping. Only the live rows are compared; the canonical tail is padding.
-static bool annMatchesCanonicalLut(const AntMinerT& m, const AntMinerT::ANN& local, const unsigned char* canonicalLut)
-{
-    for (unsigned long long k = 0; k < m.numberOfUpdatedNeurons; k++)
-    {
-        const unsigned long long n = m.updatedNeuronIndices[k];
-        if (memcmp(&local.lut[n * AntMinerT::lutSize], &canonicalLut[k * AntMinerT::lutSize], AntMinerT::lutSize) != 0)
-        {
-            return false;
-        }
-    }
-    return true;
-}
-
-// Rebuild a local ANN from the node's canonical LUT
-static void annFromCanonicalLut(const AntMinerT& m, const unsigned char* canonicalLut,
-    const AntMinerT::ANN& rootAnn, AntMinerT::ANN& out)
-{
-    memcpy(&out, &rootAnn, sizeof(AntMinerT::ANN));
-    for (unsigned long long k = 0; k < m.numberOfUpdatedNeurons; k++)
-    {
-        const unsigned long long n = m.updatedNeuronIndices[k];
-        memcpy(&out.lut[n * AntMinerT::lutSize], &canonicalLut[k * AntMinerT::lutSize], AntMinerT::lutSize);
-    }
 }
 
 // One node of this miner's own tree (isolated per-identity trees)
@@ -397,7 +368,7 @@ struct OwnNode
     unsigned int resolveAttempts;           // resolve cycles seen while still unresolved (mismatch detector)
     unsigned int selfTick;
     unsigned int selfSolutionIndexInTick;
-    AntMinerT::ANN ann;                     // this node's evolved ANN (bestANN at mining time)
+    AntMinerT::ANN ann;                     // this node's evolved ANN (the best ANN from mining)
 };
 
 // Children a parent already holds, from the node's listing plus anything submitted since the last
@@ -625,9 +596,9 @@ static void mineWorker(const unsigned char* pool, const unsigned char* computorP
         _rdrand64_step((unsigned long long*)&nonce[24]);
         // Make sure the nonce is canonical
         nonce[0] = 1;                                                                     // AlgoType::Bpp9000
-        nonce[1] = (unsigned char)((nonce[1] % score_bpp9000::MAX_LUT_ENTRIES_PER_STEP) + 1); // L in [1, 10]
+        nonce[1] = (unsigned char)((nonce[1] % score_bpp9000::MAX_CHANGES_PER_STEP) + 1);       // changes/step in [1, 10]
         nonce[2] = (unsigned char)(nonce[2] % (score_bpp9000::NUMBER_OF_MUTATIONS + 1));       // K in [0, 100]
-        const unsigned int score = miner->computeScoreFromParent(job.parentAnn.lut, pubkey, nonce, job.anchorDigest);
+        const unsigned int score = miner->computeScoreFromParent(job.parentAnn, pubkey, nonce, job.anchorDigest);
         gIterations++;
 
         // Lower is better: pass the threshold, strictly beat the parent. INVALID_SCORE_VALUE
@@ -642,7 +613,7 @@ static void mineWorker(const unsigned char* pool, const unsigned char* computorP
             result.parentSolutionIndexInTick = job.parentSolutionIndexInTick;
             result.parentScore = job.parentScore;
             result.parentDepth = job.parentDepth;
-            memcpy(&result.ann, &miner->bestANN, sizeof(AntMinerT::ANN));
+            miner->getBestANN(result.ann);
             std::lock_guard<std::mutex> guard(gResultsMutex);
             gResults.push_back(result);
         }
@@ -834,9 +805,8 @@ int main(int argc, char* argv[])
                 node.selfSolutionIndexInTick = entry.selfSolutionIndexInTick;
                 node.refKnown = true;
 
-                unsigned char storedLut[CANONICAL_ANN_BYTES];
                 const int result = queryParentAnn(sock, operatorSubseed, operatorPublicKey,
-                    entry.selfTick, entry.selfSolutionIndexInTick, storedLut);
+                    entry.selfTick, entry.selfSolutionIndexInTick, node.ann);
                 if (result < 0)
                 {
                     printf("WARNING: network failure while adopting the existing tree - adopted %zu of %zu nodes.\n",
@@ -853,8 +823,7 @@ int main(int argc, char* argv[])
                 }
                 else
                 {
-                    // Came from the node, so there is nothing to verify.
-                    annFromCanonicalLut(*miner, storedLut, rootAnn, node.ann);
+                    // Came from the node (queryParentAnn filled node.ann), so there is nothing to verify.
                     node.lutChecked = true;
                     node.lutMismatch = false;
                     usable++;
@@ -1083,9 +1052,9 @@ int main(int argc, char* argv[])
                     continue;
                 }
                 attempted++;
-                unsigned char storedLut[CANONICAL_ANN_BYTES];
+                AntMinerT::ANN storedAnn;
                 const int result = queryParentAnn(sock, operatorSubseed, operatorPublicKey,
-                    node.selfTick, node.selfSolutionIndexInTick, storedLut);
+                    node.selfTick, node.selfSolutionIndexInTick, storedAnn);
                 if (result < 0)
                 {
                     netFailed = true;
@@ -1098,7 +1067,7 @@ int main(int argc, char* argv[])
                 }
                 node.lutChecked = true;
                 checkedNow++;
-                if (!annMatchesCanonicalLut(*miner, node.ann, storedLut))
+                if (memcmp(&node.ann, &storedAnn, sizeof(AntMinerT::ANN)) != 0)
                 {
                     node.lutMismatch = true;
                     mismatches++;
