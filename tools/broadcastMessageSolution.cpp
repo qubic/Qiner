@@ -345,11 +345,12 @@ int main(int argc, char* argv[])
             _rdrand64_step((unsigned long long*)&nonce[8]);
             _rdrand64_step((unsigned long long*)&nonce[16]);
             _rdrand64_step((unsigned long long*)&nonce[24]);
-            // Canonical nonce (see core isCanonicalBpp9000Nonce): nonce[0]=algo, nonce[1]=L in [1,10],
+            // Canonical nonce: nonce[0]=algo, nonce[1]=L in [1,10] (bits 0-3) + mode in [1,3] (bits 4-5),
             // nonce[2]=K=0; else core scores it INVALID once the canonical activation tick hits.
             nonce[0] = (unsigned char)AlgoType::Bpp9000;
-            // L: canonical [1, 10]
-            nonce[1] = (nonce[1] % score_bpp9000::MAX_LUT_ENTRIES_PER_STEP) + 1;
+            const unsigned char L = (unsigned char)((nonce[1] % score_bpp9000::MAX_CHANGES_PER_STEP) + 1);
+            const unsigned char mode = (unsigned char)(((nonce[1] >> 4) % 3) + 1);
+            nonce[1] = (unsigned char)(L | (mode << 4));
             // K: canonical 0
             nonce[2] = 0;
 

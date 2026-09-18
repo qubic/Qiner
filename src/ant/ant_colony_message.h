@@ -97,8 +97,8 @@ static constexpr unsigned char ANT_PARENT_ANN_STATUS_OK = 0;        // ANN bytes
 static constexpr unsigned char ANT_PARENT_ANN_STATUS_NOT_FOUND = 1; // parentRef has no record
 static constexpr unsigned char ANT_PARENT_ANN_STATUS_IS_ROOT = 2;   // ROOT_REF; no ANN payload - miner derives the shared epoch root
 
-// On status Ok, annSizeBytes bytes of canonical ANN follow - one trit per byte, the form the
-// scorer consumes. 0 for every other status.
+// On status Ok, annSizeBytes bytes of the ANN follow - the full exchanged form (wiring + start state +
+// LUTs), the same bytes the scorer inherits. 0 for every other status.
 struct RespondAntParentAnnHeader
 {
     unsigned int parentRefTick;

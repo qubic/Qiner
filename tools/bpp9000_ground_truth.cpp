@@ -36,7 +36,7 @@
 //
 // Solo mode (default): writes "pubkey, nonce, miningseed, score" from computeScore.
 // Ant mode (--ant): numSamples = number of chains; each chain is a lineage of --depth nodes (default 2)
-//   under one random pubkey. Level 0 extends the derived root; level i extends level i-1's bestANN.
+//   under one random pubkey. Level 0 extends the derived root; level i extends level i-1's best network.
 //   Writes "chain, depth, pubkey, nonce, anchor, seed, score" from computeScoreFromParent (canonical
 //   nonces, random anchors). A chain is sequential (each node feeds the next), so threading is across chains.
 
@@ -59,6 +59,15 @@ using ProdMiner = score_bpp9000::Miner<
     Prod::numberOfInputNeurons, Prod::numberOfOutputNeurons, Prod::sequenceLength, Prod::windowWidth,
     Prod::maxNumberOfTicks, Prod::numberOfNeighbors, Prod::populationThreshold, Prod::numberOfMutations,
     Prod::solutionThreshold>;
+
+// nonce[1] carries L (bits 0-3, in [1, MAX_CHANGES_PER_STEP]) and the mutation mode (bits 4-5, in [1, 3]);
+// both come from one random byte so the goldens cover all three modes.
+static unsigned char canonicalModeL(unsigned char rnd)
+{
+    const unsigned char L = (unsigned char)((rnd % score_bpp9000::MAX_CHANGES_PER_STEP) + 1);
+    const unsigned char mode = (unsigned char)(((rnd >> 4) % 3) + 1);
+    return (unsigned char)(L | (mode << 4));
+}
 
 static void toHex(const unsigned char* b, int n, char* out)
 {
@@ -172,7 +181,7 @@ int main(int argc, char** argv)
         const int numChains = (numSamples > 0) ? numSamples : 0;
 
         // Each chain: one identity (pubkey) and a lineage of `depth` nodes. Level 0 extends the derived
-        // root; level i extends level i-1's bestANN. Per level: a canonical nonce + a random anchor.
+        // root; level i extends level i-1's best network. Per level: a canonical nonce + a random anchor.
         struct AntChain
         {
             unsigned char pub[32];
@@ -190,9 +199,9 @@ int main(int argc, char** argv)
                 unsigned char* nonce = &chains[(size_t)c].nonces[(size_t)d * 32];
                 unsigned char* anchor = &chains[(size_t)c].anchors[(size_t)d * 32];
                 bpp9000_synth::fillRandom(nonce, 32);
-                nonce[0] = 1;                                                                          // AlgoType::Bpp9000
-                nonce[1] = (unsigned char)((nonce[1] % score_bpp9000::MAX_LUT_ENTRIES_PER_STEP) + 1);  // L in [1, 10]
-                nonce[2] = (unsigned char)(nonce[2] % (score_bpp9000::NUMBER_OF_MUTATIONS + 1));        // K in [0, 100]
+                nonce[0] = 1;                                                                    // AlgoType::Bpp9000
+                nonce[1] = canonicalModeL(nonce[1]);                                             // L in [1, 10] + mode in [1, 3]
+                nonce[2] = (unsigned char)(nonce[2] % (score_bpp9000::NUMBER_OF_MUTATIONS + 1)); // K in [0, 100]
                 bpp9000_synth::fillRandom(anchor, 32);
             }
         }
@@ -224,7 +233,7 @@ int main(int argc, char** argv)
         std::atomic<int> rowsWritten{0};
 
         // One thread per chain (chains are independent). Within a chain the levels are sequential -
-        // each node's bestANN becomes the next level's parent - so a chain cannot be parallelized.
+        // each node's best network becomes the next level's parent - so a chain cannot be parallelized.
         auto antWorker = [&](int tid)
         {
             ProdMiner* miner = new ProdMiner();
@@ -253,9 +262,9 @@ int main(int argc, char** argv)
                             unsigned char* nonce = &nonces[(size_t)d * 32];
                             unsigned char* anchor = &anchors[(size_t)d * 32];
                             bpp9000_synth::fillRandom(nonce, 32);
-                            nonce[0] = 1;                                                                          // AlgoType::Bpp9000
-                            nonce[1] = (unsigned char)((nonce[1] % score_bpp9000::MAX_LUT_ENTRIES_PER_STEP) + 1);  // L in [1, 10]
-                            nonce[2] = (unsigned char)(nonce[2] % (score_bpp9000::NUMBER_OF_MUTATIONS + 1));        // K in [0, 100]
+                            nonce[0] = 1;                                                                    // AlgoType::Bpp9000
+                            nonce[1] = canonicalModeL(nonce[1]);                                             // L in [1, 10] + mode in [1, 3]
+                            nonce[2] = (unsigned char)(nonce[2] % (score_bpp9000::NUMBER_OF_MUTATIONS + 1)); // K in [0, 100]
                             bpp9000_synth::fillRandom(anchor, 32);
                         }
                     }
@@ -269,11 +278,11 @@ int main(int argc, char** argv)
 
                     ProdMiner::ANN parentAnn;
                     memset(&parentAnn, 0, sizeof(parentAnn));
-                    miner->deriveRootANN(localSeed, parentAnn);   // level 0's parent = the shared epoch root
+                    miner->deriveRootANN(pub, parentAnn);   // level 0's parent = this identity's own root
                     bool anyInfinite = false;
                     for (int d = 0; d < depth; ++d)
                     {
-                        scores[(size_t)d] = miner->computeScoreFromParent(parentAnn.lut, pub, &nonces[(size_t)d * 32], &anchors[(size_t)d * 32]);
+                        scores[(size_t)d] = miner->computeScoreFromParent(parentAnn, pub, &nonces[(size_t)d * 32], &anchors[(size_t)d * 32]);
                         if (scores[(size_t)d] == ProdMiner::INFINITE_ERROR)
                         {
                             anyInfinite = true;
@@ -282,8 +291,8 @@ int main(int argc, char** argv)
                                 break;   // doomed lineage - stop scoring the rest, draw a fresh one
                             }
                         }
-                        // This node becomes the next level's parent (its stored canonical LUT = bestANN).
-                        memcpy(parentAnn.lut, miner->bestANN.lut, sizeof(parentAnn.lut));
+                        // This node becomes the next level's parent (the network behind its best score).
+                        miner->getBestANN(parentAnn);
                     }
 
                     if (skipTimeouts && anyInfinite)
@@ -348,6 +357,9 @@ int main(int argc, char** argv)
     {
         bpp9000_synth::fillRandom(samples[i].pub, 32);
         bpp9000_synth::fillRandom(samples[i].non, 32);
+        samples[i].non[0] = 1;                              // AlgoType::Bpp9000
+        samples[i].non[1] = canonicalModeL(samples[i].non[1]); // L in [1, 10] + mode in [1, 3]
+        samples[i].non[2] = 0;                              // standalone: K = 0
     }
 
     const size_t n = samples.size();

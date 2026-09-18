@@ -209,6 +209,13 @@ int main(int argc, char** argv)
     {
         bpp9000_synth::fillRandom(samples[i].pub, 32);
         bpp9000_synth::fillRandom(samples[i].non, 32);
+        // Canonical standalone nonce: nonce[1] carries L (bits 0-3, in [1, 10]) and the mutation mode
+        // (bits 4-5, in [1, 3]); nonce[2] = K = 0.
+        samples[i].non[0] = 1;   // AlgoType::Bpp9000
+        const unsigned char L = (unsigned char)((samples[i].non[1] % score_bpp9000::MAX_CHANGES_PER_STEP) + 1);
+        const unsigned char mode = (unsigned char)(((samples[i].non[1] >> 4) % 3) + 1);
+        samples[i].non[1] = (unsigned char)(L | (mode << 4));
+        samples[i].non[2] = 0;
     }
 
     FILE* sf = fopen(samplesPath, "w");

@@ -102,7 +102,7 @@ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 8
 
 # Algorithm 2026-08-14 (ant colony on bpp9000)
 
-Standalone bpp9000 mining (`Qiner`) searches from your identity's root network for any network that scores at or below the epoch threshold; every solution stands alone. **Ant-colony mining is tree search over the same scorer.** You take a *parent* network already in the tree - the epoch's shared root, or a node you placed earlier - inherit its LUTs, mutate them under your nonce, and score the result. A hit must clear the epoch threshold **and** strictly beat its parent's score. On acceptance it becomes a new tree node that can be extended further, so the colony converges toward the single lowest-error network of the epoch. Lower score is better - the score is an error count.
+Standalone bpp9000 mining (`Qiner`) searches from your identity's root network for any network that scores at or below the epoch threshold; every solution stands alone. **Ant-colony mining is tree search over the same scorer.** You take a *parent* network already in the tree - the epoch's shared root, or a node you placed earlier - inherit its network (start state, wiring, LUTs), mutate one of the three under your nonce, and score the result. A hit must clear the epoch threshold **and** strictly beat its parent's score. On acceptance it becomes a new tree node that can be extended further, so the colony converges toward the single lowest-error network of the epoch. Lower score is better - the score is an error count.
 
 Trees are **per-identity**: a forest, one tree per mining identity, and you only ever extend your own nodes. `AntMiner.cpp` is the reference implementation; the Standalone `Qiner` is unchanged and still available.
 
@@ -110,12 +110,12 @@ Trees are **per-identity**: a forest, one tree per mining identity, and you only
 
 The authoritative tree lives on the **node** - it is the consensus store (a per-identity forest), and every accepted solution becomes a node in it. The node also recomputes every claimed score deterministically and gates acceptance, so the miner's real job is to reproduce the node's score bit-exactly and submit on time. Everything the miner keeps locally is advisory; consensus lives on the node.
 
-But the miner does **not** have to treat that tree as remote storage it queries on every step. Extending a parent needs the parent's LUT (its evolved ANN), and scoring is fully deterministic in `(parentLUT, pubkey, nonce, anchorDigest)` - so a miner can **build the tree locally and avoid fetching ANNs**:
+But the miner does **not** have to treat that tree as remote storage it queries on every step. Extending a parent needs the parent's ANN, and scoring is fully deterministic in `(parentANN, pubkey, nonce, anchorDigest)` - so a miner can **build the tree locally and avoid fetching ANNs**:
 
-- **Your own nodes** - the miner already holds the winning `bestANN` of every solution it computed, so extending your own frontier needs no fetch. The reference `AntMiner` keeps exactly that (`ownNodes[].ann`) and, since trees are per-identity, only ever extends its own nodes - so its mining loop fetches no ANN at all.
-- **A node you did not compute** (a pool splitting one identity across workers, or after a restart) - either ask the node for the parent's ANN, or rebuild it locally by replaying the lineage from the root under the on-chain `(nonce, anchor)` values. Both land on the same LUT; the local rebuild trades CPU for network round-trips. `AntMiner` takes the first route once at startup (step 3b): without it a restarted miner abandons the tree it paid deposits to build and climbs again from the root.
+- **Your own nodes** - the miner already holds the winning network of every solution it computed, so extending your own frontier needs no fetch. The reference `AntMiner` keeps exactly that (`ownNodes[].ann`) and, since trees are per-identity, only ever extends its own nodes - so its mining loop fetches no ANN at all.
+- **A node you did not compute** (a pool splitting one identity across workers, or after a restart) - either ask the node for the parent's ANN, or rebuild it locally by replaying the lineage from the root under the on-chain `(nonce, anchor)` values. Both land on the same ANN; the local rebuild trades CPU for network round-trips. `AntMiner` takes the first route once at startup (step 3b): without it a restarted miner abandons the tree it paid deposits to build and climbs again from the root.
 
-The node still owns what only it can: the epoch context (root seed, threshold, freshness window, child cap), the anchors, acceptance gating, and the deposit refund/forfeit. Full wire and consensus contract: core `doc/ant_colony/ant_colony_miner_guide.md`.
+The node still owns what only it can: the epoch context (root seed, threshold, freshness window, child cap), the anchors, acceptance gating, and the deposit refund/forfeit. Full wire and consensus contract: core `doc/ant_colony_mining.md`.
 
 ## Build and run
 
@@ -140,17 +140,17 @@ What `AntMiner` does each round:
 1. **Epoch context** (`REQUEST_ANT_EPOCH_CONTEXT`) - spectrum digest (seeds the `random2` pool), canonical task hashes, threshold, freshness window, per-parent child cap.
 2. **Task check** - load `--task`, require its topology/data hashes to equal the node's; abort otherwise.
 3. **Root** - `deriveRootANN(spectrumDigest)` from the pool: the epoch's shared root network, identical for every identity. Never stored on-chain; you compute it. The spectrum digest both SEEDS the pool and is the root seed; per-identity variation enters only through the mutation seeds (`K12(publicKey || nonce || anchor)`).
-3b. **Adopt the existing tree** (startup only) - page this identity's tree (`REQUEST_ANT_IDENTITY_TREE`) and fetch each node's stored ANN (`REQUEST_ANT_PARENT_ANN`), converting the canonical rows back through `updatedNeuronIndices`, so a restart resumes from the on-chain frontier instead of the root. Nothing is persisted locally; the node is the source of truth. Costs one tree walk plus one ANN fetch per node. A node whose ANN the pool evicted is kept for bookkeeping but never extended, and without `--operator` the query is refused and the miner warns it is restarting from ROOT.
+3b. **Adopt the existing tree** (startup only) - page this identity's tree (`REQUEST_ANT_IDENTITY_TREE`) and fetch each node's stored ANN (`REQUEST_ANT_PARENT_ANN`), adopting the bytes directly, so a restart resumes from the on-chain frontier instead of the root. Nothing is persisted locally; the node is the source of truth. Costs one tree walk plus one ANN fetch per node. A node whose ANN the pool evicted is kept for bookkeeping but never extended, and without `--operator` the query is refused and the miner warns it is restarting from ROOT.
 4. **Parent selection** - the best resolved own node (lowest score = deepest frontier), else the root. 1-in-8 rounds explore a random resolved node or the root instead, so the search does not lock into one basin. (Pools tune this policy.)
 5. **Anchor first** - pick the latest completed tick (stepping back past ticks the node stored no data for). Its digest `K12(anchorTick \|\| K12(TickData))` is part of the child RNG seed, so the anchor is fixed *before* mining and keeps the hit inside the freshness window.
-6. **Search** - random canonical nonce, `computeScoreFromParent(parentLUT, pubkey, nonce, anchorDigest)`; keep a hit when `score <= threshold` and `score < parentScore`.
+6. **Search** - random canonical nonce, `computeScoreFromParent(parentANN, pubkey, nonce, anchorDigest)`; keep a hit when `score <= threshold` and `score < parentScore`.
 7. **Submit** - only if the anchor is still inside the freshness window (else drop as stale) and the parent is under its child cap. The cap is checked against the node's own `childCount` from the last tree read plus any submissions it has not caught up with yet - never against a counter local to this process, which a restart would silently reset.
 
    **Why the miner gates this.** Your `BROADCAST_MESSAGE` is free, but it is half the path: the computor turns an accepted message into an `AntColonyMiningSolutionTransaction` funded with `SOLUTION_SECURITY_DEPOSIT` from its own balance, refunded only on `Valid`/`ValidNotStored` with a matching claimed score. Every reject keeps the deposit. The node pre-filters duplicates and over-cap candidates, but `childCount` only grows, so a parent can reach the cap between publication and execution - a race only the miner can reduce. A miner submitting solutions the node will reject is spending its computor's money. Sent as a `BROADCAST_MESSAGE` whose decrypted `gammingKey[0] == 3` (`MESSAGE_TYPE_ANT_SOLUTION`); payload = parent ref + anchor tick + claimed score + nonce.
 8. **Resolve** - every ~10 s, read your own tree back (operator-signed `REQUEST_ANT_IDENTITY_TREE`), learn each submitted node's self-ref (a child can only extend a parent whose ref is known), and read tree growth. A listing entry carries no nonce, so a submission is matched on `(score, anchorTick, depth, parentRef)` and each entry is **claimed** as it binds - otherwise two of your own hits sharing that tuple would both take the same entry. A wrong pick among interchangeable entries is caught by the LUT self-check in step 9. A node still not on-chain after 3 resolve cycles warns of a likely **anchor-digest mismatch** - compare the printed `Anchor tick N digest=` with the node's F3 line.
-9. **LUT self-check** - every 60 s, fetch each resolved own node's stored ANN back once (operator-signed `REQUEST_ANT_PARENT_ANN`) and compare it with the local copy; a node is checked only once, so the cost is one fetch per accepted solution. On mismatch the node is excluded from parent selection - children mined from a wrong local LUT would score differently on-chain, wasting work and forfeiting deposits.
+9. **ANN self-check** - every 60 s, fetch each resolved own node's stored ANN back once (operator-signed `REQUEST_ANT_PARENT_ANN`) and compare it with the local copy; a node is checked only once, so the cost is one fetch per accepted solution. On mismatch the node is excluded from parent selection - children mined from a wrong local ANN would score differently on-chain, wasting work and forfeiting deposits.
 
-**ANN layout note.** The node's canonical ANN bytes store the LUT rows of the **non-input neurons in ascending index, densely** (row `k` = neuron `updatedNeuronIndices[k]`, tail rows zero). This miner stores rows by absolute neuron index, so ANN bytes exchanged with a node must be converted through `updatedNeuronIndices` - never compared directly. Full byte map: core `doc/ant_colony_mining.md`, section 2.7(c).
+**ANN layout note.** The node's ANN bytes are the full exchanged form - wiring, then the start state, then one LUT row per neuron at its absolute index (bpp9000 has no input neurons, so every neuron has a row). This miner stores the ANN the same way, so node ANN bytes compare and copy directly. Full byte map: core `doc/ant_colony_mining.md`, section 2.7(c).
 
 ## Canonical ant nonce
 
@@ -159,44 +159,45 @@ What `AntMiner` does each round:
 | Byte | Meaning | Range |
 |---|---|---|
 | `nonce[0]` | algorithm select | `1` (bpp9000) |
-| `nonce[1]` | `L` - LUT entries changed per mutation step | `[1, 10]` (`MAX_LUT_ENTRIES_PER_STEP`) |
+| `nonce[1]` bits 0-3 | `L` - changes per mutation step | `[1, 10]` (`MAX_CHANGES_PER_STEP`) |
+| `nonce[1]` bits 4-5 | mutation mode: 1 = start state, 2 = wiring, 3 = LUTs (bits 6-7 = 0) | `[1, 3]` |
 | `nonce[2]` | `K` - explore-phase length (anti-attractor) | `[0, 100]` (`NUMBER_OF_MUTATIONS`) |
 | `nonce[3..31]` | search-path seed | any |
 
-Contrast with the Standalone `Qiner`, which *clamps* `L` and forces `K = 0`; the ant path requires the values already in range.
+The Standalone `Qiner` uses the same `nonce[1]` layout but forces `K = 0`; the scorer no longer clamps, so both paths require `L`, the mode, and `K` already in range.
 
 ## Scorer API - two entry points, one walk
 
-Both entry points feed the same anti-attractor local search (`computeScoreFromCurrent(L, K, cur)`); they differ only in where the starting LUTs and the mutation seeds come from.
+Both entry points feed the same anti-attractor local search (`computeScoreFromCurrent(L, K, mode, cur)`); they differ only in where the starting network and the mutation seeds come from.
 
 | Aspect | Standalone (`Qiner`) | Ant (`AntMiner`) |
 |---|---|---|
-| Entry | `computeScore(pubkey, nonce)` | `deriveRootANN` + `computeScoreFromParent(parentLUT, pubkey, nonce, anchorDigest)` |
-| Starting LUTs | `random2(K12(pubkey))` - your root | the parent's LUT (root or a fetched node) |
+| Entry | `computeScore(pubkey, nonce)` | `deriveRootANN` + `computeScoreFromParent(parentANN, pubkey, nonce, anchorDigest)` |
+| Starting network | task wiring + start state/LUTs from `K12(pubkey)` - your root | the parent's network (root or a fetched node) |
 | Mutation seeds | `K12(pubkey \|\| nonce[3..31])` | `K12(pubkey \|\| nonce[3..31] \|\| anchorDigest)` - anchor-bound |
 | `K` (explore) | forced 0 | `nonce[2]` |
 | Pool | owned (`initialize` fills it) | shared read-only (`setPool`), one pool across all threads |
 
-`bestANN` (via `getBestANN`) is the evolved network of the winning search; it becomes the child node's LUT that the next depth extends.
+`getBestANN` returns the evolved network of the winning search; it becomes the child node the next depth extends.
 
 # Algorithm 2026-07-16 (bpp9000)
 
 ## Files
-- score_bpp9000.h: the bpp9000 scorer (a recurrent ternary-LUT network).
+- score_bpp9000.h: the bpp9000 scorer (an autonomous recurrent ternary-LUT network).
 - task_file.h: the unified task-file format (topology + data blocks) with pack/parse and hash helpers.
 
 ## Run argument
 The miner takes one optional trailing CLI argument - `[Task file path]` - the path to the bpp9000 task file; it defaults to `task_bpp9000.bin`.
 
 ## Overview
-A recurrent ternary-LUT network scored over a windowed sequence. Given a task (a fixed network wiring plus a sequence of input/output samples), mining searches the per-neuron lookup tables (LUTs) for the configuration that reproduces the samples with the fewest errors. The score is that error count (lower is better). The task is loaded from a unified task file (defaults to `task_bpp9000.bin`).
+An autonomous recurrent ternary network. Given a task (a root wiring plus a target output sequence), the network runs on its own from a fixed start state and emits an output sequence; mining searches for the network - its start state, wiring, or LUTs - that reproduces the target with the fewest errors. The score is that error count (lower is better). The task is loaded from a unified task file (defaults to `task_bpp9000.bin`).
 
 ## Key concepts
 - Every value is a **trit** in `{0, 1, 2}`, where `2 = UNKNOWN`.
-- The network has `P` neurons, each typed **input** / **output** / **evolution**; each neuron owns a `27`-entry **LUT** (`3^3`).
+- The network has `P` neurons; every neuron computes and owns a `27`-entry **LUT** (`3^3`). There are no input neurons.
 - A neuron's next value is `LUT[t0 + 3*t1 + 9*t2]`, indexed by its three neighbours' trits.
-- Wiring is explicit per neuron (`neighborIndices[n*K + k]`, any neuron in `[0, P)`). One **signal neuron** self-clocks the input feeding.
-- Only the LUTs change under mutation; the wiring and the sample data are fixed by the task.
+- Wiring is explicit per neuron (`neighborIndices[n*K + k]`, any neuron in `[0, P)`). One **control neuron** self-clocks the emits: on each step where it is not UNKNOWN, the output neuron is graded against the next target value.
+- The network runs continuously from its start state (never reset). A solution is its start state, wiring, and LUTs; one mutation mode - declared in the nonce - changes one of the three.
 
 ## Random sources
 Where every part of the network comes from. `random2` never invents bytes - it reads them out of the pool, and the "derived from" value only selects the read positions.
@@ -204,25 +205,25 @@ Where every part of the network comes from. `random2` never invents bytes - it r
 | Source | Derived from | When |
 |---|---|---|
 | `random2` pool | epoch spectrum digest | epoch start |
-| Neuron placement (input / output / signal) | read from the task file | epoch start |
-| Wiring (each neuron's 3 neighbours) | read from the task file | epoch start |
-| Initial LUT contents | `K12(publicKey)` | per public key |
-| Mutation seeds | `K12(publicKey \|\| nonce[3..31])` | per nonce |
-| Algorithm select | `(nonce[0] & 1) != 0` -> bpp9000 (odd nonce; the miner mines odd nonces) | per nonce |
-| L (LUT entries changed per mutation) | `nonce[1]` | per nonce |
+| Control + output indices, wiring | read from the task file | epoch start |
+| Root start state + LUTs (standalone) | `K12(publicKey)` | per public key |
+| Root start state + LUTs (ant root) | `K12(spectrumDigest)` | per epoch |
+| Mutation seeds | `K12(publicKey \|\| nonce[3..31])` (+ anchor for the ant path) | per nonce |
+| Algorithm select | `nonce[0] == 1` -> bpp9000 | per nonce |
+| L (changes per step) | `nonce[1]` bits 0-3 | per nonce |
+| Mutation mode | `nonce[1]` bits 4-5 | per nonce |
 | K (anti-attractor length) | `nonce[2]` | per nonce |
 
-The random pool is built from the epoch spectrum digest, in Qiner it is seen as miningSeed, the public key decide the starting LUT ,the public key and nonce decide *where each draw reads from it*. Neuron placement and wiring are no longer random: they are read from the task file.
+The random pool is built from the epoch spectrum digest, in Qiner it is seen as miningSeed; the public key decides the standalone root start state and LUTs, the public key and nonce decide *where each draw reads from it*. Control/output placement and wiring are not random: they are read from the task file.
 
 ## Constants
 ```
 K = NUMBER_OF_NEIGHBORS        // 3, hardcoded (LUT index is base-3 over 3 trits)
-N = NUMBER_OF_INPUT_NEURONS
 P = POPULATION_THRESHOLD       // total neurons, power of 2
-T = SEQUENCE_LENGTH            // samples in the task
-W = WINDOW_WIDTH               // samples fed per window
-numberOfWindows = T - W        // graded windows per score()
-maxTicks = MAX_NUMBER_OF_TICKS // per-window inference budget; exceeding it fails the process
+T = SEQUENCE_LENGTH            // target values in the task
+W = WINDOW_WIDTH               // kept only to set the emit count
+numberOfWindows = T - W        // number of graded emits per score()
+maxTicks = MAX_NUMBER_OF_TICKS // rollout tick budget; exceeding it fails the network
 S = NUMBER_OF_MUTATIONS        // search steps
 ```
 
@@ -231,60 +232,59 @@ S = NUMBER_OF_MUTATIONS        // search steps
 initialize(miningSeed, taskFile):
     generateRandom2Pool(miningSeed) -> pool
     loadTaskData(taskFile):
-        parse + hash-verify the topology block (input / output / signal indices + neighbour wiring)
-        parse + hash-verify the data block (packed input / output trit samples)
-        derive neuron roles (input / output / evolution)
+        parse + hash-verify the topology block (control + output indices + neighbour wiring)
+        parse + hash-verify the data block; keep the output column as the target sequence
 
-// The miner tries random odd nonces until one solves:
+// The miner tries random canonical nonces until one solves:
 findSolution(publicKey, nonce):
     return computeScore(publicKey, nonce) <= SOLUTION_THRESHOLD
 
-computeScore(publicKey, nonce):             // anti-attractor local search
-    L     = clamp(nonce[1], 1, MAX_L)       // LUT flips applied per step
-    Kexpl = clamp(nonce[2], 0, S)           // length of the explore phase
-    cur   = initializeANN(publicKey, nonce)
-    best  = cur
+computeScore(publicKey, nonce):             // standalone: root from the pubkey, K = 0
+    L    = nonce[1] bits 0-3                 // changes applied per step
+    mode = nonce[1] bits 4-5                 // 1 = start state, 2 = wiring, 3 = LUTs
+    deriveRootMaterial(publicKey)           // root start state + LUTs from the pool
+    deriveMutationSeeds(publicKey, nonce)   // the search path (nonce[0..2] excluded)
+    wiring = task-file root wiring
+    cur = score()
+    return computeScoreFromCurrent(L, K = 0, mode, cur)
+    // Ant path: computeScoreFromParent inherits the parent network instead and uses K = nonce[2].
+
+computeScoreFromCurrent(L, K, mode, cur):   // anti-attractor local search
+    best = cur
     for s in 0 .. S-1:
-        save previous LUTs
-        for i in 0 .. L-1:                       // apply L LUT flips this step
-            mutate(mutationSeed[s * MAX_L + i])  // each flips one LUT entry
+        save the current network
+        for i in 0 .. L-1:                              // apply L changes this step
+            mutate(mode, mutationSeed[s * MAX_L + i])   // one change of the declared mode
         r = score()
-        accept = (s < Kexpl) ? (r >= cur)   // explore: allow equal-or-worse
-                             : (r <= cur)   // exploit: keep equal-or-better
-        if accept: cur = r  else: rollback to previous LUTs
+        accept = (s < K) ? (r >= cur)       // explore: allow equal-or-worse
+                         : (r <= cur)       // exploit: keep equal-or-better
+        if accept: cur = r  else: rollback to the saved network
         if cur < best: best = cur
     return best
 
-initializeANN(publicKey, nonce):
-    initial LUT    = random2(K12(publicKey), pool)                 // per computor, fixed
-    mutation seeds = random2(K12(publicKey || nonce[3..31]), pool) // the search path (nonce[0..2] excluded)
-    set neuron types + values (UNKNOWN); set current LUTs from the initial LUT
-    return score()
-
-score():                                    // windowed, self-clocked; lower is better
-    failures = 0
-    for window in 0 .. numberOfWindows-1:
-        reset all neurons to UNKNOWN
-        feed W input samples, paced by the signal neuron, then read the settled output
-        if it does not settle within maxTicks: return INFINITE_ERROR   // fails the whole network
-        if predicted output != expected output: failures++
+score():                                    // autonomous rollout, self-clocked; lower is better
+    set every neuron to its start-state trit
+    failures = 0; counter = 0
+    loop until counter == numberOfWindows:
+        if ticks exceed maxTicks: return INFINITE_ERROR    // fails the whole network
+        step every neuron: next = LUT[t0 + 3*t1 + 9*t2] from its three neighbours
+        if the control neuron is not UNKNOWN:
+            if output neuron != target[counter]: failures++
+            counter++
     return failures
 
-processTick():                              // one inference step
-    for each non-input neuron:
-        next value = LUT[t0 + 3*t1 + 9*t2] from its three neighbours
-    commit the new value into every non-input neuron
-
-mutate(seed):                               // one LUT flip
-    pick one LUT entry of one non-input neuron; set it to a different trit
+mutate(mode, seed):                         // one change of the declared mode
+    mode 1: flip one neuron's start-state trit
+    mode 2: rewire one link to a different neuron
+    mode 3: flip one LUT entry of one neuron
 ```
 
 ## Task file
 Three parts: `[ header ][ topology block ][ data block ]`.
 
-- **Header** - dimensions (`N, M, T, P, K`) plus a hash of each block; lets the miner confirm it loaded the intended task.
-- **Topology block** - the fixed ANN wiring: which neurons are input / output / signal, and each neuron's neighbours. Defines the network structure and never changes during mining.
-- **Data block** - the sample sequence the ANN is scored against: the input/output rows it must predict across each window.
+- **Header** - dimensions plus a hash of each block; lets the miner confirm it loaded the intended task.
+- **Topology block** - the root ANN wiring: the control and output neuron indices, and each neuron's neighbours. Defines the root topology and never changes during mining.
+- **Data block** - the target sequence: the scorer keeps the output column of each row and grades the network's emits against it (the input column is ignored).
 
 Both blocks are KangarooTwelve-hashed against the header and rejected on mismatch. Byte-level layout is in `task_file.h`.
 
