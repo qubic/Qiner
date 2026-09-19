@@ -23,7 +23,7 @@ struct Bpp9000Config
 };
 
 // Production config
-using ProdConfig = Bpp9000Config<18, 1, 24 * 365, 24 * 28, 100000, 3, 64, 100,
+using ProdConfig = Bpp9000Config<18, 1, 24 * 365, 24 * 28, 100000, 3, 1024, 1000,
                              (unsigned int)(((24 * 365 - 24 * 28) - 1) * 4 / 5)>;
 
 // Regression configs that all SUBVIEW-load from the one full production task file

@@ -15,9 +15,9 @@ namespace score_bpp9000
 
 static constexpr unsigned long long NUMBER_OF_INPUT_NEURONS = 18;
 static constexpr unsigned long long NUMBER_OF_OUTPUT_NEURONS = 1;
-static constexpr unsigned long long POPULATION_THRESHOLD = 64;
+static constexpr unsigned long long POPULATION_THRESHOLD = 1024;
 static constexpr unsigned long long NUMBER_OF_NEIGHBORS = 3;
-static constexpr unsigned long long NUMBER_OF_MUTATIONS = 100;
+static constexpr unsigned long long NUMBER_OF_MUTATIONS = 1000;
 static constexpr unsigned long long MAX_NUMBER_OF_TICKS = 100000;
 
 static constexpr unsigned int MAX_CHANGES_PER_STEP = 10;
@@ -63,7 +63,7 @@ struct Miner
     static constexpr unsigned long long numberOfLinks = populationThreshold * numberOfNeighbors;
 
     static_assert(numberOfNeighbors == 3, "the LUT index is hardcoded for 3 neighbors");
-    static_assert((populationThreshold & (populationThreshold - 1)) == 0, "populationThreshold must be a power of 2");
+    static_assert(populationThreshold % 16 == 0, "populationThreshold must be a multiple of 16 so sizeof(RootMaterial) stays a multiple of 64 for the random2 draw");
     static_assert(numberOfOutputNeurons == 1, "score() grades only output neuron 0");
     static_assert(numberOfWindows >= 1 && numberOfWindows < sequenceLength, "the emit count must be positive and within the target sequence");
     static_assert(maxNumberOfTicks > numberOfWindows, "maxNumberOfTicks must exceed the emit count so all emits can fit");
