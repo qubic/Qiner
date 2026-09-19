@@ -171,26 +171,34 @@ struct Miner
             header.version != task_file::VERSION ||
             header.numInputTrits != numberOfInputNeurons ||
             header.numOutputTrits != numberOfOutputNeurons ||
-            header.numPairs < sequenceLength ||
-            header.population != populationThreshold ||
-            header.numNeighbors != numberOfNeighbors)
+            header.numPairs < sequenceLength
+#if BPP9000_TASK_HAS_TOPOLOGY
+            || header.population != populationThreshold
+            || header.numNeighbors != numberOfNeighbors
+#endif
+            )
         {
             return false;
         }
 
         unsigned char hash[task_file::DATA_HASH_SIZE];
+        // Size the topology skip from the file's own header, so a task written at any population loads.
+        const unsigned long long topoBytes = task_file::topologyBytes(
+            header.numInputTrits, header.numOutputTrits, header.population, header.numNeighbors);
 
-        if (!task_file::readTaskFileBlock(taskFilePath, sizeof(task_file::TaskFileHeader), topoBlockBuf, topoBlockSize))
+#if BPP9000_TASK_HAS_TOPOLOGY
+        if (!task_file::readTaskFileBlock(taskFilePath, sizeof(task_file::TaskFileHeader), topoBlockBuf, topoBytes))
         {
             return false;
         }
-        KangarooTwelve(topoBlockBuf, (unsigned int)topoBlockSize, hash, task_file::DATA_HASH_SIZE);
+        KangarooTwelve(topoBlockBuf, (unsigned int)topoBytes, hash, task_file::DATA_HASH_SIZE);
         if (memcmp(hash, header.topologyHash, task_file::DATA_HASH_SIZE) != 0)
         {
             return false;
         }
+#endif
 
-        if (!task_file::readTaskFileBlock(taskFilePath, sizeof(task_file::TaskFileHeader) + topoBlockSize, dataBlockBuf, dataBlockSize))
+        if (!task_file::readTaskFileBlock(taskFilePath, sizeof(task_file::TaskFileHeader) + topoBytes, dataBlockBuf, dataBlockSize))
         {
             return false;
         }

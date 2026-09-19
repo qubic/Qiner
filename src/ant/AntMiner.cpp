@@ -748,11 +748,16 @@ int main(int argc, char* argv[])
             printf("A --task FILE is required for mining.\n");
             return 1;
         }
-        if (memcmp(gTaskTopoHash, epochContext.topologyHash, 32) != 0
-            || memcmp(gTaskDataHash, epochContext.dataHash, 32) != 0)
+        if (
+#if BPP9000_TASK_HAS_TOPOLOGY
+            memcmp(gTaskTopoHash, epochContext.topologyHash, 32) != 0 ||
+#endif
+            memcmp(gTaskDataHash, epochContext.dataHash, 32) != 0)
         {
             printf("TASK MISMATCH: your --task file is not the one the node scores against.\n");
+#if BPP9000_TASK_HAS_TOPOLOGY
             printf("  topology block: %s\n", memcmp(gTaskTopoHash, epochContext.topologyHash, 32) ? "DIFFERS" : "ok");
+#endif
             printf("  data block    : %s\n", memcmp(gTaskDataHash, epochContext.dataHash, 32) ? "DIFFERS" : "ok");
             printf("Get the epoch's canonical bpp9000 task file - a wrong task wastes work and forfeits computor deposits.\n");
             return 1;

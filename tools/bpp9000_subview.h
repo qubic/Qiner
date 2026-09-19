@@ -26,29 +26,34 @@ bool readSubviewBlocks(const char* taskFilePath,
 
     const unsigned int N = (unsigned int)C::numberOfInputNeurons;
     const unsigned int M = (unsigned int)C::numberOfOutputNeurons;
-    const unsigned int P = (unsigned int)C::populationThreshold;
-    const unsigned int K = (unsigned int)C::numberOfNeighbors;
     const unsigned long long T = (unsigned long long)C::sequenceLength;
 
     if (header.magic != task_file::MAGIC ||
         header.version != task_file::VERSION ||
         header.numInputTrits < N ||
         header.numOutputTrits != M ||
-        header.numPairs < T ||
-        header.population != P ||
-        header.numNeighbors != K)
+        header.numPairs < T
+#if BPP9000_TASK_HAS_TOPOLOGY
+        || header.population != (unsigned int)C::populationThreshold
+        || header.numNeighbors != (unsigned int)C::numberOfNeighbors
+#endif
+        )
     {
         return false;
     }
 
     const unsigned int fileN = header.numInputTrits;
     const unsigned int fileM = header.numOutputTrits;
-    const unsigned long long fileTopoBytes = task_file::topologyBytes(fileN, fileM, P, K);
+    // Size the topology skip from the file's own header, so a task written at any population loads.
+    const unsigned long long fileTopoBytes = task_file::topologyBytes(fileN, fileM, header.population, header.numNeighbors);
     const unsigned long long fileInBytes = task_file::packedBytes(fileN);
     const unsigned long long fileRowBytes = fileInBytes + task_file::packedBytes(fileM);
 
     unsigned char hash[task_file::DATA_HASH_SIZE];
 
+#if BPP9000_TASK_HAS_TOPOLOGY
+    const unsigned int P = (unsigned int)C::populationThreshold;
+    const unsigned int K = (unsigned int)C::numberOfNeighbors;
     // Topology: read the full block, verify its hash, parse with FILE dims, re-serialise the first N
     // inputs / M outputs / signal / all P*K neighbours into C's layout.
     std::vector<unsigned char> fileTopo((size_t)fileTopoBytes);
@@ -71,6 +76,7 @@ bool readSubviewBlocks(const char* taskFilePath,
     topoBlockOut.resize((size_t)task_file::topologyBytes(N, M, P, K));
     task_file::serializeTopologyBlock(N, M, P, K, fileInputIdx.data(), fileOutputIdx.data(),
                                       signalIdx, neighborIdx.data(), topoBlockOut.data());
+#endif
 
     // Data: read the first T rows, verify dataHash only if full, unpack per FILE row layout keeping the
     // first N inputs / M outputs, then re-pack into C's data layout.
