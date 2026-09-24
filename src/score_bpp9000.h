@@ -26,8 +26,8 @@ static constexpr unsigned long long SEQUENCE_LENGTH = 24 * 365;
 static constexpr unsigned long long WINDOW_WIDTH = 24 * 28;
 static constexpr unsigned long long NUMBER_OF_WINDOWS = SEQUENCE_LENGTH - WINDOW_WIDTH;
 
-// shiftCap is derived from the frame width, so changing WINDOW_WIDTH moves it off one week.
-static_assert(WINDOW_WIDTH / 4 == 24 * 7, "the production frame must cap the slide at one week");
+// How far the frame may slide: production predicts one week ahead.
+static constexpr unsigned long long SHIFT_CAP = 24 * 7;
 
 // Frame-0 floor. The score is an error inside ONE frame, so it lands in [0, WINDOW_WIDTH].
 static constexpr unsigned int SOLUTION_THRESHOLD = (unsigned int)(WINDOW_WIDTH * 45 / 100);
@@ -46,7 +46,8 @@ template <
     unsigned long long numberOfNeighbors,
     unsigned long long populationThreshold,
     unsigned long long numberOfMutations,
-    unsigned int solutionThreshold>
+    unsigned int solutionThreshold,
+    unsigned long long shiftCapParam>
 struct Miner
 {
     static constexpr unsigned long long maxNumberOfNeurons = populationThreshold;
@@ -67,8 +68,8 @@ struct Miner
     // Rolling-frame scoring, derived from the frame width so they scale with any config.
     // advanceThreshold: shift advances when the frame error drops to <= 1/3 of the frame.
     static constexpr unsigned int advanceThreshold = (unsigned int)(windowWidth / 3);
-    // shiftCap: how far the frame may slide (one week at the production frame width).
-    static constexpr unsigned long long shiftCap = windowWidth / 4;
+    // shiftCap: how far the frame may slide. Production predicts one week ahead, so 24 * 7.
+    static constexpr unsigned long long shiftCap = shiftCapParam;
 
     static constexpr unsigned long long numberOfLinks = populationThreshold * numberOfNeighbors;
 

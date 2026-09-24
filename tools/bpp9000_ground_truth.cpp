@@ -58,7 +58,8 @@ using Prod = bpp9000_params::ProdConfig;
 using ProdMiner = score_bpp9000::Miner<
     Prod::numberOfInputNeurons, Prod::numberOfOutputNeurons, Prod::sequenceLength, Prod::windowWidth,
     Prod::maxNumberOfTicks, Prod::numberOfNeighbors, Prod::populationThreshold, Prod::numberOfMutations,
-    Prod::solutionThreshold>;
+    Prod::solutionThreshold,
+    Prod::shiftCap>;
 
 // nonce[1] carries L (bits 0-3, in [1, MAX_CHANGES_PER_STEP]) and the mutation mode (bits 4-5, in [1, 3]);
 // both come from one random byte so the goldens cover all three modes.

@@ -72,7 +72,8 @@ static bool scoreColumn(const char* taskPath, const unsigned char* seed, const s
     using Miner = score_bpp9000::Miner<
         C::numberOfInputNeurons, C::numberOfOutputNeurons, C::sequenceLength, C::windowWidth,
         C::maxNumberOfTicks, C::numberOfNeighbors, C::populationThreshold, C::numberOfMutations,
-        C::solutionThreshold>;
+        C::solutionThreshold,
+        C::shiftCap>;
 
     const size_t n = samples.size();
     std::vector<unsigned int> col(n);

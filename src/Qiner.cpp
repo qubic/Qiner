@@ -181,7 +181,8 @@ using Bpp9000Miner = score_bpp9000::Miner<
     score_bpp9000::NUMBER_OF_NEIGHBORS,
     score_bpp9000::POPULATION_THRESHOLD,
     score_bpp9000::NUMBER_OF_MUTATIONS,
-    score_bpp9000::SOLUTION_THRESHOLD>;
+    score_bpp9000::SOLUTION_THRESHOLD,
+    score_bpp9000::SHIFT_CAP>;
 
 int miningThreadProc()
 {

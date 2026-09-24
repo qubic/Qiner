@@ -227,7 +227,7 @@ maxTicks = MAX_NUMBER_OF_TICKS // rollout tick budget; exceeding it fails the ne
 S = NUMBER_OF_MUTATIONS        // search steps
 
 advanceThreshold = W / 3       // frame error at or below this advances shift by 1
-shiftCap         = W / 4       // highest frame the miner may reach (one week at W = 24 * 28)
+shiftCap         = 24 * 7      // highest frame the miner may reach; production predicts one week ahead
 SOLUTION_THRESHOLD = W * 45 / 100   // frame-0 floor, applies only at shift 0
 ```
 
