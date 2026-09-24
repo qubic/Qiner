@@ -207,7 +207,7 @@ Where every part of the network comes from. `random2` never invents bytes - it r
 | `random2` pool | epoch spectrum digest | epoch start |
 | Control + output indices | mining seed, shared by every miner | epoch start |
 | Root wiring + start state + LUTs (standalone) | `K12(publicKey)` | per public key |
-| Root wiring + start state + LUTs (ant root) | `K12(spectrumDigest)` | per epoch |
+| Root wiring + start state + LUTs (ant root) | `K12(publicKey)` | per identity |
 | Mutation seeds | `K12(publicKey \|\| nonce[3..31])` (+ anchor for the ant path) | per nonce |
 | Algorithm select | `nonce[0] == 1` -> bpp9000 | per nonce |
 | L (changes per step) | `nonce[1]` bits 0-3 | per nonce |
