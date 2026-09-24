@@ -26,6 +26,9 @@ static constexpr unsigned long long SEQUENCE_LENGTH = 24 * 365;
 static constexpr unsigned long long WINDOW_WIDTH = 24 * 28;
 static constexpr unsigned long long NUMBER_OF_WINDOWS = SEQUENCE_LENGTH - WINDOW_WIDTH;
 
+// shiftCap is derived from the frame width, so changing WINDOW_WIDTH moves it off one week.
+static_assert(WINDOW_WIDTH / 4 == 24 * 7, "the production frame must cap the slide at one week");
+
 // Frame-0 floor. The score is an error inside ONE frame, so it lands in [0, WINDOW_WIDTH].
 static constexpr unsigned int SOLUTION_THRESHOLD = (unsigned int)(WINDOW_WIDTH * 45 / 100);
 
@@ -64,8 +67,6 @@ struct Miner
     // Rolling-frame scoring, derived from the frame width so they scale with any config.
     // advanceThreshold: shift advances when the frame error drops to <= 1/3 of the frame.
     static constexpr unsigned int advanceThreshold = (unsigned int)(windowWidth / 3);
-    // errorThreshold: frame-0 floor; above it a network is no better than random.
-    static constexpr unsigned int errorThreshold = (unsigned int)(windowWidth * 45 / 100);
     // shiftCap: how far the frame may slide (one week at the production frame width).
     static constexpr unsigned long long shiftCap = windowWidth / 4;
 
@@ -78,7 +79,9 @@ struct Miner
     static_assert(shiftCap >= 1 && shiftCap <= numberOfWindows, "shiftCap must be positive and keep the last frame inside the data");
     static_assert(maxNumberOfTicks > shiftCap + windowWidth, "maxNumberOfTicks must exceed the deepest emit count so all emits can fit");
     static_assert(advanceThreshold < windowWidth, "the advance gate must be reachable inside one frame");
-    static_assert(errorThreshold > advanceThreshold && errorThreshold < windowWidth, "the shift-0 floor must sit above the climbed frontier and below a random network");
+    // At frame 0 the error is always above advanceThreshold, so a lower floor would admit no root at all;
+    // at the frame width every error passes and the floor does nothing.
+    static_assert(solutionThreshold > advanceThreshold && solutionThreshold < windowWidth, "the frame-0 floor must admit some root and still reject the worst");
     static_assert(populationThreshold <= 65536, "ANN.neighbor is a 16-bit transfer index");
 
     // Per-identity root material, drawn from the pubkey seed. Trits are one byte each (read as bytes); each

@@ -102,7 +102,7 @@ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 8
 
 # Algorithm 2026-08-14 (ant colony on bpp9000)
 
-Standalone bpp9000 mining (`Qiner`) searches from your identity's root network for any network that scores at or below the epoch threshold; every solution stands alone. **Ant-colony mining is tree search over the same scorer.** You take a *parent* network already in the tree - the epoch's shared root, or a node you placed earlier - inherit its network (start state, wiring, LUTs), mutate one of the three under your nonce, and score the result. A hit must clear the epoch threshold **and** strictly beat its parent's score. On acceptance it becomes a new tree node that can be extended further, so the colony converges toward the single lowest-error network of the epoch. Lower score is better - the score is an error count.
+Standalone bpp9000 mining (`Qiner`) searches from your identity's root network for any network that scores at or below the epoch threshold; every solution stands alone. **Ant-colony mining is tree search over the same scorer.** You take a *parent* network already in the tree - the epoch's shared root, or a node you placed earlier - inherit its network (start state, wiring, LUTs), mutate one of the three under your nonce, and score the result. A hit must strictly beat its parent's rating, and at shift 0 it must also clear the epoch threshold. On acceptance it becomes a new tree node that can be extended further, so the colony converges toward the network that reaches the furthest frame, breaking ties on the lowest error. A child inherits its parent's shift, so reach ratchets up the tree and never goes backwards.
 
 Trees are **per-identity**: a forest, one tree per mining identity, and you only ever extend your own nodes. `AntMiner.cpp` is the reference implementation; the Standalone `Qiner` is unchanged and still available.
 
@@ -180,7 +180,7 @@ Both entry points feed the same anti-attractor local search (`computeScoreFromCu
 
 `getBestANN` returns the evolved network of the winning search; it becomes the child node the next depth extends.
 
-# Algorithm 2026-07-16 (bpp9000)
+# Algorithm 2026-09-21 (bpp9000, rolling frame)
 
 ## Files
 - score_bpp9000.h: the bpp9000 scorer (an autonomous recurrent ternary-LUT network).
@@ -190,7 +190,7 @@ Both entry points feed the same anti-attractor local search (`computeScoreFromCu
 The miner takes one optional trailing CLI argument - `[Task file path]` - the path to the bpp9000 task file; it defaults to `task_bpp9000.bin`.
 
 ## Overview
-An autonomous recurrent ternary network. Given a task (a root wiring plus a target output sequence), the network runs on its own from a fixed start state and emits an output sequence; mining searches for the network - its start state, wiring, or LUTs - that reproduces the target with the fewest errors. The score is that error count (lower is better). The task is loaded from a unified task file (defaults to `task_bpp9000.bin`).
+An autonomous recurrent ternary network. Given a task (a target output sequence), the network runs on its own from a fixed start state and emits an output sequence; mining searches for the network - its start state, wiring, or LUTs - that reproduces the target with the fewest errors. The score is that error count (lower is better). The task is loaded from a unified task file (defaults to `task_bpp9000.bin`).
 
 ## Key concepts
 - Every value is a **trit** in `{0, 1, 2}`, where `2 = UNKNOWN`.
@@ -205,26 +205,41 @@ Where every part of the network comes from. `random2` never invents bytes - it r
 | Source | Derived from | When |
 |---|---|---|
 | `random2` pool | epoch spectrum digest | epoch start |
-| Control + output indices, wiring | read from the task file | epoch start |
-| Root start state + LUTs (standalone) | `K12(publicKey)` | per public key |
-| Root start state + LUTs (ant root) | `K12(spectrumDigest)` | per epoch |
+| Control + output indices | mining seed, shared by every miner | epoch start |
+| Root wiring + start state + LUTs (standalone) | `K12(publicKey)` | per public key |
+| Root wiring + start state + LUTs (ant root) | `K12(spectrumDigest)` | per epoch |
 | Mutation seeds | `K12(publicKey \|\| nonce[3..31])` (+ anchor for the ant path) | per nonce |
 | Algorithm select | `nonce[0] == 1` -> bpp9000 | per nonce |
 | L (changes per step) | `nonce[1]` bits 0-3 | per nonce |
 | Mutation mode | `nonce[1]` bits 4-5 | per nonce |
 | K (anti-attractor length) | `nonce[2]` | per nonce |
 
-The random pool is built from the epoch spectrum digest, in Qiner it is seen as miningSeed; the public key decides the standalone root start state and LUTs, the public key and nonce decide *where each draw reads from it*. Control/output placement and wiring are not random: they are read from the task file.
+The random pool is built from the epoch spectrum digest, in Qiner it is seen as miningSeed; the public key decides the standalone root start state and LUTs, the public key and nonce decide *where each draw reads from it*. Control/output placement comes from the mining seed and is the same for every miner in the epoch. Wiring is derived per identity alongside the start state and LUTs, and is one of the three things a nonce may mutate.
 
 ## Constants
 ```
 K = NUMBER_OF_NEIGHBORS        // 3, hardcoded (LUT index is base-3 over 3 trits)
 P = POPULATION_THRESHOLD       // total neurons, power of 2
 T = SEQUENCE_LENGTH            // target values in the task
-W = WINDOW_WIDTH               // kept only to set the emit count
-numberOfWindows = T - W        // number of graded emits per score()
+W = WINDOW_WIDTH               // graded frame width; one score() grades exactly W emits
+numberOfWindows = T - W        // data room the frame may slide within
 maxTicks = MAX_NUMBER_OF_TICKS // rollout tick budget; exceeding it fails the network
 S = NUMBER_OF_MUTATIONS        // search steps
+
+advanceThreshold = W / 3       // frame error at or below this advances shift by 1
+shiftCap         = W / 4       // highest frame the miner may reach (one week at W = 24 * 28)
+SOLUTION_THRESHOLD = W * 45 / 100   // frame-0 floor, applies only at shift 0
+```
+
+## Rating
+A solution is judged by a pair, not a single number.
+```
+Rating { error, shift }
+  error  wrong emits inside the graded frame, lower is better
+  shift  rolling-frame position reached, higher is better
+
+isBetterThan(other)   higher shift wins; equal shift is settled by fewer errors
+clearsFloor(t)        (shift > 0) || (error <= t)      // the floor only bites at shift 0
 ```
 
 ## Code flow (pseudocode)
@@ -237,39 +252,50 @@ initialize(miningSeed, taskFile):
 
 // The miner tries random canonical nonces until one solves:
 findSolution(publicKey, nonce):
-    return computeScore(publicKey, nonce) <= SOLUTION_THRESHOLD
+    rating = computeScore(publicKey, nonce)
+    return rating.isValid() and rating.clearsFloor(SOLUTION_THRESHOLD)
 
 computeScore(publicKey, nonce):             // standalone: root from the pubkey, K = 0
     L    = nonce[1] bits 0-3                 // changes applied per step
     mode = nonce[1] bits 4-5                 // 1 = start state, 2 = wiring, 3 = LUTs
-    deriveRootMaterial(publicKey)           // root start state + LUTs from the pool
+    deriveRootMaterial(publicKey)           // root wiring + start state + LUTs from the pool
     deriveMutationSeeds(publicKey, nonce)   // the search path (nonce[0..2] excluded)
-    wiring = task-file root wiring
-    cur = score()
-    return computeScoreFromCurrent(L, K = 0, mode, cur)
-    // Ant path: computeScoreFromParent inherits the parent network instead and uses K = nonce[2].
+    shift = 0                               // standalone has no parent, so start at the first frame
+    return computeScoreFromCurrent(L, K = 0, mode)
+    // Ant path: computeScoreFromParent inherits the parent network AND its shift, and uses K = nonce[2].
 
-computeScoreFromCurrent(L, K, mode, cur):   // anti-attractor local search
+advanceShift():                             // slide the frame as far as this fixed network can hold
+    loop forever:
+        frameError = score()
+        if frameError > advanceThreshold: return Rating{ frameError, shift }   // cannot master this frame
+        if shift == shiftCap:             return Rating{ frameError, shift }   // the cap
+        shift++
+
+computeScoreFromCurrent(L, K, mode):        // anti-attractor local search
+    cur  = advanceShift()
     best = cur
     for s in 0 .. S-1:
-        save the current network
+        save the current network and shift
         for i in 0 .. L-1:                              // apply L changes this step
             mutate(mode, mutationSeed[s * MAX_L + i])   // one change of the declared mode
-        r = score()
-        accept = (s < K) ? (r >= cur)       // explore: allow equal-or-worse
-                         : (r <= cur)       // exploit: keep equal-or-better
-        if accept: cur = r  else: rollback to the saved network
-        if cur < best: best = cur
+        r = advanceShift()
+        accept = false
+        if r.isValid():                                 // a timed-out rollout is never accepted
+            accept = (s < K) ? r.error >= cur.error     // explore: error only, shift cannot go back
+                             : r.isBetterThan(best)     // exploit: the full (shift, error) rating
+        if accept: cur = r  else: restore the saved network and shift
+        if cur.isValid() and cur.isBetterThan(best): best = cur
+    shift = best.shift
     return best
 
 score():                                    // autonomous rollout, self-clocked; lower is better
     set every neuron to its start-state trit
     failures = 0; counter = 0
-    loop until counter == numberOfWindows:
+    loop until counter == shift + W:        // emits shift + W, grades only [shift, shift + W)
         if ticks exceed maxTicks: return INFINITE_ERROR    // fails the whole network
         step every neuron: next = LUT[t0 + 3*t1 + 9*t2] from its three neighbours
         if the control neuron is not UNKNOWN:
-            if output neuron != target[counter]: failures++
+            if counter >= shift and output neuron != target[counter]: failures++
             counter++
     return failures
 
@@ -283,7 +309,7 @@ mutate(mode, seed):                         // one change of the declared mode
 Three parts: `[ header ][ topology block ][ data block ]`.
 
 - **Header** - dimensions plus a hash of each block; lets the miner confirm it loaded the intended task.
-- **Topology block** - the root ANN wiring: the control and output neuron indices, and each neuron's neighbours. Defines the root topology and never changes during mining.
+- **Topology block** - present in the format but **not loaded** (`BPP9000_TASK_HAS_TOPOLOGY 0`): wiring is derived per identity and control/output come from the mining seed. It is skipped by the size its own header declares, so a task written at any population still loads, and its hash is not checked.
 - **Data block** - the target sequence: the scorer keeps the output column of each row and grades the network's emits against it (the input column is ignored).
 
 Both blocks are KangarooTwelve-hashed against the header and rejected on mismatch. Byte-level layout is in `task_file.h`.
