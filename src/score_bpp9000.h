@@ -490,23 +490,31 @@ struct Miner
         memcpy(bestLut, curLut, sizeof(bestLut));
     }
 
-    // Advances shift while the network masters its frame, capped at shiftCap. Returns the error there.
-    unsigned int advanceShift(unsigned int frameError)
+    // Scores the frame at the current shift and advances while the network masters it. Stops when it
+    // cannot master a frame, or at shiftCap. Returns the rating reached.
+    Rating advanceShift()
     {
-        while (frameError <= advanceThreshold && shift < shiftCap)
+        for (;;)
         {
+            const unsigned int frameError = score();
+            if (frameError > advanceThreshold)
+            {
+                return Rating{ frameError, (unsigned int)shift };   // cannot master this frame
+            }
+            if (shift == shiftCap)
+            {
+                return Rating{ frameError, (unsigned int)shift };   // the cap
+            }
             shift++;
-            frameError = score();
         }
-        return frameError;
     }
 
     // Anti-attractor walk: L mutations/step, explore for K steps then exploit, one-step rollback of the
     // network and the shift. Explore compares error; exploit and kept-best compare the rating.
     // Returns the committed rating, leaving that network in best*.
-    Rating computeScoreFromCurrent(unsigned int L, unsigned long long K, unsigned char mode, unsigned int startScore)
+    Rating computeScoreFromCurrent(unsigned int L, unsigned long long K, unsigned char mode)
     {
-        Rating cur{ advanceShift(startScore), (unsigned int)shift };
+        Rating cur = advanceShift();
         Rating best = cur;
         snapshotBest();
 
@@ -520,7 +528,7 @@ struct Miner
                 mutate(mode, mutationSeed[s * MAX_CHANGES_PER_STEP + i]);
             }
 
-            const Rating r{ advanceShift(score()), (unsigned int)shift };
+            const Rating r = advanceShift();
 
             // A timed-out rollout is never accepted and never becomes the best.
             bool accept = false;
@@ -561,7 +569,7 @@ struct Miner
         applyRootMaterial();
 
         shift = 0;   // standalone has no parent, so the frame starts at the first window
-        return computeScoreFromCurrent(L, 0, mode, score());
+        return computeScoreFromCurrent(L, 0, mode);
     }
 
     bool findSolution(unsigned char* publicKey, unsigned char* nonce, unsigned int& outScore)
@@ -601,7 +609,7 @@ struct Miner
         const unsigned char mode = modeOf(nonce);
 
         shift = parentShift;   // inherit; the root's children start at 0
-        return computeScoreFromCurrent(L, K, mode, score());
+        return computeScoreFromCurrent(L, K, mode);
     }
 };
 
