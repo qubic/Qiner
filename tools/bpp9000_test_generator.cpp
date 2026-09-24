@@ -114,7 +114,7 @@ static bool scoreColumn(const char* taskPath, const unsigned char* seed, const s
             unsigned char non[32];
             memcpy(pub, samples[i].pub, 32);
             memcpy(non, samples[i].non, 32);
-            col[i] = miner->computeScore(pub, non);
+            col[i] = miner->computeScore(pub, non).error;
         }
         delete miner;
     };

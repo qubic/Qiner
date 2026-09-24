@@ -66,9 +66,9 @@ struct RespondAntIdentityTreeHeader
 };
 static_assert(sizeof(RespondAntIdentityTreeHeader) == 12, "RespondAntIdentityTreeHeader unexpected size");
 
-// One stored node of the identity's tree. score is an error count - a child must score strictly
-// below it. No nonce or identity field, so a miner cannot match an entry to its own submission
-// exactly - see the claim/consume matching in AntMiner.cpp.
+// One stored node of the identity's tree. A child must beat it in (shift, error), and starts its own
+// walk at this node's shift. No nonce or identity field, so a miner cannot match an entry to its own
+// submission exactly - see the claim/consume matching in AntMiner.cpp.
 // childCount is counted only up to the cap, so it reads 0 for every entry while the cap is unbound.
 struct AntIdentityTreeNode
 {
@@ -76,12 +76,13 @@ struct AntIdentityTreeNode
     unsigned int selfSolutionIndexInTick;
     unsigned int parentTick;          // this node's own parent; (0, 0xFFFFFFFF) = root
     unsigned int parentSolutionIndexInTick;
-    unsigned int score;
+    unsigned int score;               // error count inside the frame, lower is better
+    unsigned int shift;               // rolling-frame position reached, higher is better
     unsigned int childCount;
     unsigned int anchorTick;
     unsigned int depth;
 };
-static_assert(sizeof(AntIdentityTreeNode) == 32, "AntIdentityTreeNode unexpected size");
+static_assert(sizeof(AntIdentityTreeNode) == 36, "AntIdentityTreeNode unexpected size");
 
 // One node's stored network, named by parentRef - the ANN a miner mutates to extend it.
 // Operator-signed, like the identity-tree request.

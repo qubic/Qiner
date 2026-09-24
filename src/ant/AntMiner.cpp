@@ -371,6 +371,7 @@ struct OwnNode
 {
     unsigned char nonce[32];
     unsigned int score;
+    unsigned int shift;                     // frame this node reached
     unsigned int anchorTick;                // tick number the mining was anchored to
     unsigned int depth;                     // 1 for root children
     unsigned int parentTick;          // this node's parentRef
@@ -494,6 +495,8 @@ struct MineJob
     unsigned int parentTick;
     unsigned int parentSolutionIndexInTick;
     unsigned int parentScore;
+    // The frame the parent reached; the child starts there. 0 for a ROOT parent.
+    unsigned int parentShift;
     // 0 for a ROOT parent
     unsigned int parentDepth;
     unsigned int anchorTick;
@@ -510,10 +513,12 @@ struct MineResult
 {
     unsigned char nonce[32];
     unsigned int score;
+    unsigned int shift;          // the frame this solution reached
     unsigned int anchorTick;
     unsigned int parentTick;
     unsigned int parentSolutionIndexInTick;
     unsigned int parentScore;
+    unsigned int parentShift;
     unsigned int parentDepth;
     AntMinerT::ANN ann;
 };
@@ -615,20 +620,23 @@ static void mineWorker(const unsigned char* pool, const unsigned char* computorP
         const unsigned char mode = (unsigned char)(((nonce[1] >> 4) % 3) + 1);                          // mode in [1, 3]
         nonce[1] = (unsigned char)(L | (mode << 4));
         nonce[2] = (unsigned char)(nonce[2] % (score_bpp9000::NUMBER_OF_MUTATIONS + 1));                // K in [0, 100]
-        const unsigned int score = miner->computeScoreFromParent(job.parentAnn, pubkey, nonce, job.anchorDigest);
+        const score_bpp9000::Rating rating =
+            miner->computeScoreFromParent(job.parentAnn, job.parentShift, pubkey, nonce, job.anchorDigest);
         gIterations++;
 
-        // Lower is better: pass the threshold, strictly beat the parent. INVALID_SCORE_VALUE
-        // (0xFFFFFFFF) is a timeout/non-canonical result and is filtered by the <= threshold test.
-        if (score <= job.threshold && score < job.parentScore)
+        // Beat the parent, clear the frame-0 floor, and reject a timed-out or non-canonical walk.
+        const score_bpp9000::Rating parentRating{ job.parentScore, job.parentShift };
+        if (rating.isValid() && rating.isBetterThan(parentRating) && rating.clearsFloor(job.threshold))
         {
             MineResult result;
             memcpy(result.nonce, nonce, 32);
-            result.score = score;
+            result.score = rating.error;
+            result.shift = rating.shift;
             result.anchorTick = job.anchorTick;
             result.parentTick = job.parentTick;
             result.parentSolutionIndexInTick = job.parentSolutionIndexInTick;
             result.parentScore = job.parentScore;
+            result.parentShift = job.parentShift;
             result.parentDepth = job.parentDepth;
             miner->getBestANN(result.ann);
             std::lock_guard<std::mutex> guard(gResultsMutex);
@@ -823,6 +831,7 @@ int main(int argc, char* argv[])
                 OwnNode node;
                 memset(&node, 0, sizeof(node));   // nonce stays zero: unused for a node we did not mine
                 node.score = entry.score;
+                node.shift = entry.shift;
                 node.anchorTick = entry.anchorTick;
                 node.depth = entry.depth;
                 node.parentTick = entry.parentTick;
@@ -912,6 +921,7 @@ int main(int argc, char* argv[])
         const unsigned int parentTick = parentNode ? parentNode->selfTick : ROOT_TICK;
         const unsigned int parentSolutionIndexInTick = parentNode ? parentNode->selfSolutionIndexInTick : ROOT_INDEX_IN_TICK;
         const unsigned int parentScore = parentNode ? parentNode->score : 0xFFFFFFFFU;   // root: WORST
+        const unsigned int parentShift = parentNode ? parentNode->shift : 0U;            // root: frame 0
         const AntMinerT::ANN& parentAnn = parentNode ? parentNode->ann : rootAnn;
 
         // Anchor-first: the anchor digest is part of the child RNG seed, so the anchor is chosen
@@ -977,6 +987,7 @@ int main(int argc, char* argv[])
                 gJob.parentTick = parentTick;
                 gJob.parentSolutionIndexInTick = parentSolutionIndexInTick;
                 gJob.parentScore = parentScore;
+                gJob.parentShift = parentShift;
                 gJob.parentDepth = parentNode ? parentNode->depth : 0U;
                 gJob.anchorTick = cachedAnchorTick;
                 memcpy(gJob.anchorDigest, cachedAnchorDigest, 32);
@@ -1031,6 +1042,7 @@ int main(int argc, char* argv[])
                 OwnNode node;
                 memcpy(node.nonce, r.nonce, 32);
                 node.score = r.score;
+                node.shift = r.shift;
                 node.anchorTick = r.anchorTick;
                 node.depth = r.parentDepth + 1U;
                 node.parentTick = r.parentTick;

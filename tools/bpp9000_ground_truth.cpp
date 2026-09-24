@@ -222,7 +222,7 @@ int main(int argc, char** argv)
             printf("Cannot open %s\n", outPath);
             return 1;
         }
-        fprintf(f, "chain, depth, pubkey, nonce, anchor, seed, score\n");
+        fprintf(f, "chain, depth, pubkey, nonce, anchor, seed, shift, score\n");
         fflush(f);
 
         char seedHex[65];
@@ -249,6 +249,7 @@ int main(int argc, char** argv)
             std::vector<unsigned char> nonces((size_t)depth * 32);
             std::vector<unsigned char> anchors((size_t)depth * 32);
             std::vector<unsigned int> scores((size_t)depth);
+            std::vector<unsigned int> shifts((size_t)depth);
             for (int c = tid; c < numChains; c += antThreads)
             {
                 for (;;)   // one pass, unless --skip-timeouts rejects a lineage that hit INFINITE_ERROR
@@ -280,10 +281,14 @@ int main(int argc, char** argv)
                     memset(&parentAnn, 0, sizeof(parentAnn));
                     miner->deriveRootANN(pub, parentAnn);   // level 0's parent = this identity's own root
                     bool anyInfinite = false;
+                    unsigned long long parentShift = 0;   // the identity's root starts at frame 0
                     for (int d = 0; d < depth; ++d)
                     {
-                        scores[(size_t)d] = miner->computeScoreFromParent(parentAnn, pub, &nonces[(size_t)d * 32], &anchors[(size_t)d * 32]);
-                        if (scores[(size_t)d] == ProdMiner::INFINITE_ERROR)
+                        const score_bpp9000::Rating rating = miner->computeScoreFromParent(
+                            parentAnn, parentShift, pub, &nonces[(size_t)d * 32], &anchors[(size_t)d * 32]);
+                        scores[(size_t)d] = rating.error;
+                        shifts[(size_t)d] = rating.shift;
+                        if (!rating.isValid())
                         {
                             anyInfinite = true;
                             if (skipTimeouts)
@@ -291,8 +296,9 @@ int main(int argc, char** argv)
                                 break;   // doomed lineage - stop scoring the rest, draw a fresh one
                             }
                         }
-                        // This node becomes the next level's parent (the network behind its best score).
+                        // This node becomes the next level's parent: its network and its frame.
                         miner->getBestANN(parentAnn);
+                        parentShift = rating.shift;
                     }
 
                     if (skipTimeouts && anyInfinite)
@@ -310,7 +316,7 @@ int main(int argc, char** argv)
                         toHex(&anchors[(size_t)d * 32], 32, anchorHex);
                         {
                             std::lock_guard<std::mutex> lock(writeMutex);
-                            fprintf(f, "%d, %d, %s, %s, %s, %s, %u\n", c, d, pubHex, nonHex, anchorHex, seedHex, scores[(size_t)d]);
+                            fprintf(f, "%d, %d, %s, %s, %s, %s, %u, %u\n", c, d, pubHex, nonHex, anchorHex, seedHex, shifts[(size_t)d], scores[(size_t)d]);
                             fflush(f);
                         }
                         ++rowsWritten;
@@ -413,7 +419,7 @@ int main(int argc, char** argv)
             unsigned char non[32];
             memcpy(pub, samples[i].pub, 32);
             memcpy(non, samples[i].non, 32);
-            const unsigned int score = miner->computeScore(pub, non);
+            const unsigned int score = miner->computeScore(pub, non).error;
 
             char pubHex[65];
             char nonHex[65];

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "score_common.h"
+#include "rating.h"
 #include "K12AndKeyUtil.h"
 #include "task_file.h"
 
@@ -25,8 +26,8 @@ static constexpr unsigned long long SEQUENCE_LENGTH = 24 * 365;
 static constexpr unsigned long long WINDOW_WIDTH = 24 * 28;
 static constexpr unsigned long long NUMBER_OF_WINDOWS = SEQUENCE_LENGTH - WINDOW_WIDTH;
 
-// Placeholder threshold, adjust later.
-static constexpr unsigned int SOLUTION_THRESHOLD = (unsigned int)(((SEQUENCE_LENGTH - WINDOW_WIDTH) - 1) * 4 / 5);
+// Frame-0 floor. The score is an error inside ONE frame, so it lands in [0, WINDOW_WIDTH].
+static constexpr unsigned int SOLUTION_THRESHOLD = (unsigned int)(WINDOW_WIDTH * 45 / 100);
 
 // Mutation modes, declared by the miner in nonce[1].
 static constexpr unsigned char BPP9000_MODE_START = 1;    // mutate the start state
@@ -60,13 +61,24 @@ struct Miner
     static constexpr unsigned int INVALID_SCORE_VALUE = 0xFFFFFFFFU;   // non-canonical ant nonce
     static constexpr unsigned long long lutSize = 27;   // 3^numberOfNeighbors, base-3 index t0 + 3*t1 + 9*t2
 
+    // Rolling-frame scoring, derived from the frame width so they scale with any config.
+    // advanceThreshold: shift advances when the frame error drops to <= 1/3 of the frame.
+    static constexpr unsigned int advanceThreshold = (unsigned int)(windowWidth / 3);
+    // errorThreshold: frame-0 floor; above it a network is no better than random.
+    static constexpr unsigned int errorThreshold = (unsigned int)(windowWidth * 45 / 100);
+    // shiftCap: how far the frame may slide (one week at the production frame width).
+    static constexpr unsigned long long shiftCap = windowWidth / 4;
+
     static constexpr unsigned long long numberOfLinks = populationThreshold * numberOfNeighbors;
 
     static_assert(numberOfNeighbors == 3, "the LUT index is hardcoded for 3 neighbors");
     static_assert(populationThreshold % 16 == 0, "populationThreshold must be a multiple of 16 so sizeof(RootMaterial) stays a multiple of 64 for the random2 draw");
     static_assert(numberOfOutputNeurons == 1, "score() grades only output neuron 0");
-    static_assert(numberOfWindows >= 1 && numberOfWindows < sequenceLength, "the emit count must be positive and within the target sequence");
-    static_assert(maxNumberOfTicks > numberOfWindows, "maxNumberOfTicks must exceed the emit count so all emits can fit");
+    static_assert(numberOfWindows >= 1 && numberOfWindows < sequenceLength, "the frame must leave targets after it");
+    static_assert(shiftCap >= 1 && shiftCap <= numberOfWindows, "shiftCap must be positive and keep the last frame inside the data");
+    static_assert(maxNumberOfTicks > shiftCap + windowWidth, "maxNumberOfTicks must exceed the deepest emit count so all emits can fit");
+    static_assert(advanceThreshold < windowWidth, "the advance gate must be reachable inside one frame");
+    static_assert(errorThreshold > advanceThreshold && errorThreshold < windowWidth, "the shift-0 floor must sit above the climbed frontier and below a random network");
     static_assert(populationThreshold <= 65536, "ANN.neighbor is a 16-bit transfer index");
 
     // Per-identity root material, drawn from the pubkey seed. Trits are one byte each (read as bytes); each
@@ -130,6 +142,10 @@ struct Miner
     unsigned char bestInitial[maxNumberOfNeurons];
     uint32_t bestNeighborIndices[numberOfLinks];
     unsigned char bestLut[maxNumberOfNeurons * lutSize];
+
+    // Rolling-frame position: score() grades [shift, shift+windowWidth). Holds the committed shift
+    // once the walk returns.
+    unsigned long long shift = 0;
 
     // Score scratch buffers.
     unsigned char neuronOut[maxNumberOfNeurons];
@@ -276,7 +292,7 @@ struct Miner
         return isCanonicalNonceCommon(nonce) && (nonce[2] <= numberOfMutations);
     }
 
-    // Autonomous rollout: run from the start state; the control neuron gates a graded emit, timing out at maxNumberOfTicks.
+    // Emits shift+windowWidth outputs, grades only [shift, shift+windowWidth). Times out at maxNumberOfTicks.
     unsigned int score()
     {
         for (unsigned long long n = 0; n < populationThreshold; ++n)
@@ -287,7 +303,7 @@ struct Miner
         unsigned int failures = 0;
         unsigned long long counter = 0;
         unsigned long long ticks = 0;
-        while (counter < numberOfWindows)
+        while (counter < shift + windowWidth)
         {
             if (++ticks >= maxNumberOfTicks)
             {
@@ -305,7 +321,7 @@ struct Miner
 
             if (neuronOut[controlIndex] != TRIT_UNKNOWN)
             {
-                if (neuronOut[outputIndex] != outputs[counter][0])
+                if (counter >= shift && neuronOut[outputIndex] != outputs[counter][0])
                 {
                     failures++;
                 }
@@ -474,33 +490,43 @@ struct Miner
         memcpy(bestLut, curLut, sizeof(bestLut));
     }
 
-    // Anti-attractor walk: L mutations/step of the mode; explore (accept worse-or-equal) for K steps, then
-    // exploit (better-or-equal); one-step rollback. Returns the best score, leaving that network in best*.
-    unsigned int computeScoreFromCurrent(unsigned int L, unsigned long long K, unsigned char mode, unsigned int startScore)
+    // Advances shift while the network masters its frame, capped at shiftCap. Returns the error there.
+    unsigned int advanceShift(unsigned int frameError)
     {
-        unsigned int cur = startScore;
-        unsigned int best = cur;
+        while (frameError <= advanceThreshold && shift < shiftCap)
+        {
+            shift++;
+            frameError = score();
+        }
+        return frameError;
+    }
+
+    // Anti-attractor walk: L mutations/step, explore for K steps then exploit, one-step rollback of the
+    // network and the shift. Explore compares error; exploit and kept-best compare the rating.
+    // Returns the committed rating, leaving that network in best*.
+    Rating computeScoreFromCurrent(unsigned int L, unsigned long long K, unsigned char mode, unsigned int startScore)
+    {
+        Rating cur{ advanceShift(startScore), (unsigned int)shift };
+        Rating best = cur;
         snapshotBest();
 
         for (unsigned long long s = 0; s < numberOfMutations; ++s)
         {
             snapshotPrev();
+            const unsigned long long prevShift = shift;
 
             for (unsigned int i = 0; i < L; ++i)
             {
                 mutate(mode, mutationSeed[s * MAX_CHANGES_PER_STEP + i]);
             }
 
-            const unsigned int r = score();
+            const Rating r{ advanceShift(score()), (unsigned int)shift };
 
+            // A timed-out rollout is never accepted and never becomes the best.
             bool accept = false;
-            if (s < K)
+            if (r.isValid())
             {
-                accept = (r >= cur);
-            }
-            else
-            {
-                accept = (r <= cur);
+                accept = (s < K) ? r.errorWorseOrEqual(cur) : r.isBetterThan(best);
             }
 
             if (accept)
@@ -510,19 +536,22 @@ struct Miner
             else
             {
                 rollbackPrev();
+                shift = prevShift;
             }
 
-            if (cur < best)
+            if (cur.isValid() && cur.isBetterThan(best))
             {
                 best = cur;
                 snapshotBest();
             }
         }
+
+        shift = best.shift;
         return best;
     }
 
     // Standalone: root from the pubkey, walk with K = 0 (no explore).
-    unsigned int computeScore(unsigned char* publicKey, unsigned char* nonce)
+    Rating computeScore(unsigned char* publicKey, unsigned char* nonce)
     {
         const unsigned int L = changesPerStep(nonce);
         const unsigned char mode = modeOf(nonce);
@@ -531,14 +560,15 @@ struct Miner
         deriveMutationSeeds(publicKey, nonce, nullptr);
         applyRootMaterial();
 
-        const unsigned int cur = score();
-        return computeScoreFromCurrent(L, 0, mode, cur);
+        shift = 0;   // standalone has no parent, so the frame starts at the first window
+        return computeScoreFromCurrent(L, 0, mode, score());
     }
 
     bool findSolution(unsigned char* publicKey, unsigned char* nonce, unsigned int& outScore)
     {
-        outScore = computeScore(publicKey, nonce);
-        return outScore <= solutionThreshold;
+        const Rating rating = computeScore(publicKey, nonce);
+        outScore = rating.error;
+        return rating.isValid() && rating.clearsFloor(solutionThreshold);
     }
 
     // Ant colony: the identity's root, each identity's tree starts from its own root.
@@ -549,19 +579,20 @@ struct Miner
         compact(out);
     }
 
-    // Ant colony: score a child by inheriting the parent's whole network, walking with the child's seeds.
-    unsigned int computeScoreFromParent(const ANN& parentANN, const unsigned char* publicKey,
+    // Ant colony: inherit the parent's network and shift, then walk with the child's own seeds.
+    Rating computeScoreFromParent(const ANN& parentANN, unsigned long long parentShift,
+                                        const unsigned char* publicKey,
                                         const unsigned char* nonce, const unsigned char* anchorTickDigest)
     {
-        if (!isCanonicalAntNonce(nonce))
+        if (!isCanonicalAntNonce(nonce) || parentShift > shiftCap)
         {
-            return INVALID_SCORE_VALUE;
+            return Rating::worst();
         }
 
         expand(parentANN);
         if (!validateTopology())
         {
-            return INVALID_SCORE_VALUE;
+            return Rating::worst();
         }
         deriveMutationSeeds(publicKey, nonce, anchorTickDigest);
 
@@ -569,8 +600,8 @@ struct Miner
         const unsigned long long K = nonce[2];
         const unsigned char mode = modeOf(nonce);
 
-        const unsigned int cur = score();
-        return computeScoreFromCurrent(L, K, mode, cur);
+        shift = parentShift;   // inherit; the root's children start at 0
+        return computeScoreFromCurrent(L, K, mode, score());
     }
 };
 
