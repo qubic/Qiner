@@ -514,7 +514,7 @@ struct Miner
     }
 
     // Anti-attractor walk: L mutations/step, explore for K steps then exploit, one-step rollback of the
-    // network and the shift. Explore compares error; exploit and kept-best compare the rating.
+    // network and the shift. Explore compares error and records nothing; exploit compares the rating.
     // Returns the committed rating, leaving that network in best*.
     Rating computeScoreFromCurrent(unsigned int L, unsigned long long K, unsigned char mode)
     {
@@ -534,27 +534,39 @@ struct Miner
 
             const Rating r = advanceShift();
 
-            // A timed-out rollout is never accepted and never becomes the best.
-            bool accept = false;
-            if (r.isValid())
+            // A timed-out rollout is never accepted, in either phase.
+            if (s < K)
             {
-                accept = (s < K) ? r.errorWorseOrEqual(cur) : r.isBetterThan(best);
-            }
-
-            if (accept)
-            {
-                cur = r;
+                // Anti-attractor: takes only a worse-or-equal error, and records nothing.
+                if (r.isValid() && r.errorWorseOrEqual(cur))
+                {
+                    cur = r;
+                }
+                else
+                {
+                    rollbackPrev();
+                    shift = prevShift;
+                }
             }
             else
             {
-                rollbackPrev();
-                shift = prevShift;
-            }
+                // Takes anything no worse than where the walk stands.
+                if (r.isValid() && r.isNotWorseThan(cur))
+                {
+                    cur = r;
+                }
+                else
+                {
+                    rollbackPrev();
+                    shift = prevShift;
+                }
 
-            if (cur.isValid() && cur.isBetterThan(best))
-            {
-                best = cur;
-                snapshotBest();
+                // Records on the same keep-if-not-worse test as the accept above.
+                if (cur.isValid() && cur.isNotWorseThan(best))
+                {
+                    best = cur;
+                    snapshotBest();
+                }
             }
         }
 

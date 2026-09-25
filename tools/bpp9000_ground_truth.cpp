@@ -390,7 +390,7 @@ int main(int argc, char** argv)
         printf("Cannot open %s\n", outPath);
         return 1;
     }
-    fprintf(f, "pubkey, nonce, miningseed, score\n");
+    fprintf(f, "pubkey, nonce, miningseed, shift, score\n");
     fflush(f);
 
     char seedHex[65];
@@ -420,7 +420,7 @@ int main(int argc, char** argv)
             unsigned char non[32];
             memcpy(pub, samples[i].pub, 32);
             memcpy(non, samples[i].non, 32);
-            const unsigned int score = miner->computeScore(pub, non).error;
+            const score_bpp9000::Rating rating = miner->computeScore(pub, non);
 
             char pubHex[65];
             char nonHex[65];
@@ -428,7 +428,7 @@ int main(int argc, char** argv)
             toHex(samples[i].non, 32, nonHex);
             {
                 std::lock_guard<std::mutex> lock(writeMutex);
-                fprintf(f, "%s, %s, %s, %u\n", pubHex, nonHex, seedHex, score);
+                fprintf(f, "%s, %s, %s, %u, %u\n", pubHex, nonHex, seedHex, rating.shift, rating.error);
                 fflush(f);
             }
             ++written;

@@ -76,7 +76,8 @@ static bool scoreColumn(const char* taskPath, const unsigned char* seed, const s
         C::shiftCap>;
 
     const size_t n = samples.size();
-    std::vector<unsigned int> col(n);
+    std::vector<unsigned int> shiftCol(n);
+    std::vector<unsigned int> errorCol(n);
 
     int threads = numThreads;
     if (threads < 1)
@@ -115,7 +116,9 @@ static bool scoreColumn(const char* taskPath, const unsigned char* seed, const s
             unsigned char non[32];
             memcpy(pub, samples[i].pub, 32);
             memcpy(non, samples[i].non, 32);
-            col[i] = miner->computeScore(pub, non).error;
+            const score_bpp9000::Rating rating = miner->computeScore(pub, non);
+            shiftCol[i] = rating.shift;
+            errorCol[i] = rating.error;
         }
         delete miner;
     };
@@ -143,8 +146,10 @@ static bool scoreColumn(const char* taskPath, const unsigned char* seed, const s
     printf("  config %-40s : %.1f ms total, %.1f ms/sample (%d threads)\n",
            paramHeader<C>().c_str(), totalMs, (n > 0) ? totalMs / (double)n : 0.0, threads);
 
-    headers.push_back(paramHeader<C>());
-    columns.push_back(std::move(col));
+    headers.push_back(paramHeader<C>() + "-shift");
+    columns.push_back(std::move(shiftCol));
+    headers.push_back(paramHeader<C>() + "-error");
+    columns.push_back(std::move(errorCol));
     return true;
 }
 

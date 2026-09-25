@@ -40,6 +40,12 @@ struct Rating
         return error >= other.error;
     }
 
+    // The exploit test: at least as good, so a flat stretch can be walked across.
+    bool isNotWorseThan(const Rating& other) const
+    {
+        return !other.isBetterThan(*this);
+    }
+
     // Frame 0 with nothing achieved; any real solution beats it.
     static Rating worst()
     {
