@@ -102,7 +102,7 @@ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 8
 
 # Algorithm 2026-08-14 (ant colony on bpp9000)
 
-Standalone bpp9000 mining (`Qiner`) searches from your identity's root network for any network that scores at or below the epoch threshold; every solution stands alone. **Ant-colony mining is tree search over the same scorer.** You take a *parent* network already in the tree - the epoch's shared root, or a node you placed earlier - inherit its network (start state, wiring, LUTs), mutate one of the three under your nonce, and score the result. A hit must strictly beat its parent's rating, and at shift 0 it must also clear the epoch threshold. On acceptance it becomes a new tree node that can be extended further, so the colony converges toward the network that reaches the furthest frame, breaking ties on the lowest error. A child inherits its parent's shift, so reach ratchets up the tree and never goes backwards.
+Standalone bpp9000 mining (`Qiner`) searches from your identity's root network for any network that scores at or below the epoch threshold; every solution stands alone. **Ant-colony mining is tree search over the same scorer.** You take a *parent* network already in the tree - your identity's own root, or a node you placed earlier - inherit its network (start state, wiring, LUTs), mutate one of the three under your nonce, and score the result. A hit must strictly beat its parent's rating, and at shift 0 it must also clear the epoch threshold. On acceptance it becomes a new tree node that can be extended further, so the colony converges toward the network that reaches the furthest frame, breaking ties on the lowest error. A child inherits its parent's shift, so reach ratchets up the tree and never goes backwards.
 
 Trees are **per-identity**: a forest, one tree per mining identity, and you only ever extend your own nodes. `AntMiner.cpp` is the reference implementation; the Standalone `Qiner` is unchanged and still available.
 
@@ -139,7 +139,7 @@ What `AntMiner` does each round:
 
 1. **Epoch context** (`REQUEST_ANT_EPOCH_CONTEXT`) - spectrum digest (seeds the `random2` pool), canonical task hashes, threshold, freshness window, per-parent child cap.
 2. **Task check** - load `--task`, require its topology/data hashes to equal the node's; abort otherwise.
-3. **Root** - `deriveRootANN(spectrumDigest)` from the pool: the epoch's shared root network, identical for every identity. Never stored on-chain; you compute it. The spectrum digest both SEEDS the pool and is the root seed; per-identity variation enters only through the mutation seeds (`K12(publicKey || nonce || anchor)`).
+3. **Root** - `deriveRootANN(publicKey)` from the pool: this identity's own root network, so every tree starts from a different one. Never stored on-chain; you compute it. The spectrum digest seeds the pool; the public key selects where in it the root material is read.
 3b. **Adopt the existing tree** (startup only) - page this identity's tree (`REQUEST_ANT_IDENTITY_TREE`) and fetch each node's stored ANN (`REQUEST_ANT_PARENT_ANN`), adopting the bytes directly, so a restart resumes from the on-chain frontier instead of the root. Nothing is persisted locally; the node is the source of truth. Costs one tree walk plus one ANN fetch per node. A node whose ANN the pool evicted is kept for bookkeeping but never extended, and without `--operator` the query is refused and the miner warns it is restarting from ROOT.
 4. **Parent selection** - the best resolved own node (lowest score = deepest frontier), else the root. 1-in-8 rounds explore a random resolved node or the root instead, so the search does not lock into one basin. (Pools tune this policy.)
 5. **Anchor first** - pick the latest completed tick (stepping back past ticks the node stored no data for). Its digest `K12(anchorTick \|\| K12(TickData))` is part of the child RNG seed, so the anchor is fixed *before* mining and keeps the hit inside the freshness window.
@@ -168,11 +168,11 @@ The Standalone `Qiner` uses the same `nonce[1]` layout but forces `K = 0`; the s
 
 ## Scorer API - two entry points, one walk
 
-Both entry points feed the same anti-attractor local search (`computeScoreFromCurrent(L, K, mode, cur)`); they differ only in where the starting network and the mutation seeds come from.
+Both entry points feed the same anti-attractor local search (`computeScoreFromCurrent(L, K, mode)`); they differ only in where the starting network and the mutation seeds come from.
 
 | Aspect | Standalone (`Qiner`) | Ant (`AntMiner`) |
 |---|---|---|
-| Entry | `computeScore(pubkey, nonce)` | `deriveRootANN` + `computeScoreFromParent(parentANN, pubkey, nonce, anchorDigest)` |
+| Entry | `computeScore(pubkey, nonce)` | `deriveRootANN` + `computeScoreFromParent(parentANN, parentShift, pubkey, nonce, anchorDigest)` |
 | Starting network | task wiring + start state/LUTs from `K12(pubkey)` - your root | the parent's network (root or a fetched node) |
 | Mutation seeds | `K12(pubkey \|\| nonce[3..31])` | `K12(pubkey \|\| nonce[3..31] \|\| anchorDigest)` - anchor-bound |
 | `K` (explore) | forced 0 | `nonce[2]` |
@@ -238,8 +238,10 @@ Rating { error, shift }
   error  wrong emits inside the graded frame, lower is better
   shift  rolling-frame position reached, higher is better
 
-isBetterThan(other)   higher shift wins; equal shift is settled by fewer errors
-clearsFloor(t)        (shift > 0) || (error <= t)      // the floor only bites at shift 0
+isBetterThan(other)     higher shift wins; equal shift is settled by fewer errors
+isNotWorseThan(other)   not(other.isBetterThan(this))  // at least as good
+errorWorseOrEqual(other) error >= other.error          // the anti-attractor's test, error only
+clearsFloor(t)          (shift > 0) || (error <= t)    // the floor only bites at shift 0
 ```
 
 ## Code flow (pseudocode)
@@ -271,22 +273,26 @@ advanceShift():                             // slide the frame as far as this fi
         if shift == shiftCap:             return Rating{ frameError, shift }   // the cap
         shift++
 
-computeScoreFromCurrent(L, K, mode):        // anti-attractor local search
+computeScoreFromCurrent(L, K, mode):        // K explore steps, then exploit; result is best-ever
     cur  = advanceShift()
-    best = cur
+    best = cur; snapshotBest()
     for s in 0 .. S-1:
         save the current network and shift
         for i in 0 .. L-1:                              // apply L changes this step
             mutate(mode, mutationSeed[s * MAX_L + i])   // one change of the declared mode
-        r = advanceShift()
-        accept = false
-        if r.isValid():                                 // a timed-out rollout is never accepted
-            accept = (s < K) ? r.error >= cur.error     // explore: error only, shift cannot go back
-                             : r.isBetterThan(best)     // exploit: the full (shift, error) rating
-        if accept: cur = r  else: restore the saved network and shift
-        if cur.isValid() and cur.isBetterThan(best): best = cur
+        r = advanceShift()                              // a timed-out rollout is never accepted
+
+        if s < K:                                       // anti-attractor: keep-if-not-better
+            if r.isValid() and r.errorWorseOrEqual(cur): cur = r
+            else: restore the saved network and shift
+            // records nothing: explore never lowers the error
+        else:                                           // keep-if-not-worse
+            if r.isValid() and r.isNotWorseThan(cur): cur = r
+            else: restore the saved network and shift
+            if cur.isValid() and cur.isNotWorseThan(best): best = cur; snapshotBest()
+
     shift = best.shift
-    return best
+    return best        // getBestANN() returns the network snapshotted alongside it
 
 score():                                    // autonomous rollout, self-clocked; lower is better
     set every neuron to its start-state trit
