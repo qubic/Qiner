@@ -16,7 +16,7 @@ namespace score_bpp9000
 
 static constexpr unsigned long long NUMBER_OF_INPUT_NEURONS = 18;
 static constexpr unsigned long long NUMBER_OF_OUTPUT_NEURONS = 1;
-static constexpr unsigned long long POPULATION_THRESHOLD = 1024;
+static constexpr unsigned long long POPULATION_THRESHOLD = 2048;
 static constexpr unsigned long long NUMBER_OF_NEIGHBORS = 3;
 static constexpr unsigned long long NUMBER_OF_MUTATIONS = 1000;
 static constexpr unsigned long long MAX_NUMBER_OF_TICKS = 100000;
@@ -80,8 +80,7 @@ struct Miner
     static_assert(shiftCap >= 1 && shiftCap <= numberOfWindows, "shiftCap must be positive and keep the last frame inside the data");
     static_assert(maxNumberOfTicks > shiftCap + windowWidth, "maxNumberOfTicks must exceed the deepest emit count so all emits can fit");
     static_assert(advanceThreshold < windowWidth, "the advance gate must be reachable inside one frame");
-    // At frame 0 the error is always above advanceThreshold, so a lower floor would admit no root at all;
-    // at the frame width every error passes and the floor does nothing.
+    // The frame-0 floor sits between the advance gate and the frame width.
     static_assert(solutionThreshold > advanceThreshold && solutionThreshold < windowWidth, "the frame-0 floor must admit some root and still reject the worst");
     static_assert(populationThreshold <= 65536, "ANN.neighbor is a 16-bit transfer index");
 
@@ -513,9 +512,8 @@ struct Miner
         }
     }
 
-    // Anti-attractor walk: L mutations/step, explore for K steps then exploit, one-step rollback of the
-    // network and the shift. Explore compares error and records nothing; exploit compares the rating.
-    // Returns the committed rating, leaving that network in best*.
+    // L mutations/step, explore for K steps then exploit, one-step rollback of the network and shift.
+    // Returns the best-ever rating, leaving that network in best*.
     Rating computeScoreFromCurrent(unsigned int L, unsigned long long K, unsigned char mode)
     {
         Rating cur = advanceShift();
@@ -534,10 +532,10 @@ struct Miner
 
             const Rating r = advanceShift();
 
-            // A timed-out rollout is never accepted, in either phase.
+            // A timed-out rollout is never accepted.
             if (s < K)
             {
-                // Anti-attractor: takes only a worse-or-equal error, and records nothing.
+                // Anti-attractor: worse-or-equal error only; records nothing.
                 if (r.isValid() && r.errorWorseOrEqual(cur))
                 {
                     cur = r;
@@ -561,7 +559,7 @@ struct Miner
                     shift = prevShift;
                 }
 
-                // Records on the same keep-if-not-worse test as the accept above.
+                // Records on the same test as the accept above.
                 if (cur.isValid() && cur.isNotWorseThan(best))
                 {
                     best = cur;

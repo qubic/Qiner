@@ -24,7 +24,7 @@ struct Bpp9000Config
 };
 
 // Production config. The frame slides one week ahead at most.
-using ProdConfig = Bpp9000Config<18, 1, 24 * 365, 24 * 28, 100000, 3, 1024, 1000,
+using ProdConfig = Bpp9000Config<18, 1, 24 * 365, 24 * 28, 100000, 3, 2048, 1000,
                              (unsigned int)(24 * 28 * 45 / 100), 24 * 7>;
 
 // Regression configs that all SUBVIEW-load from the one full production task file
