@@ -39,9 +39,10 @@
 #include "ant_colony_message.h"
 
 // bpp9000 canonical-nonce knobs (core src/mining/score_bpp9000.h):
-// nonce[0] == 1 selects Bpp9000, nonce[1] = L in [1, 10], nonce[2] = K in [0, 100] for ant.
+// nonce[0] == 1 selects Bpp9000, nonce[1] = L in [1, 10] (bits 0-3) + mode in [1, 3] (bits 4-5),
+// nonce[2] = K in [0, 100] for ant.
 static constexpr unsigned char ALGO_BPP9000 = 1;
-static constexpr unsigned int MAX_LUT_ENTRIES_PER_STEP = 10;
+static constexpr unsigned int MAX_CHANGES_PER_STEP = 10;
 static constexpr unsigned int NUMBER_OF_MUTATIONS = 100;
 
 // --- request/response helpers (from src/AntMiner.cpp) ---
@@ -374,7 +375,9 @@ int main(int argc, char* argv[])
         unsigned char nonce[32];
         fillRandomNonce(nonce);
         nonce[0] = ALGO_BPP9000;
-        nonce[1] = (unsigned char)((nonce[1] % MAX_LUT_ENTRIES_PER_STEP) + 1);
+        const unsigned char L = (unsigned char)((nonce[1] % MAX_CHANGES_PER_STEP) + 1);
+        const unsigned char mode = (unsigned char)(((nonce[1] >> 4) % 3) + 1);
+        nonce[1] = (unsigned char)(L | (mode << 4));
         nonce[2] = (unsigned char)(nonce[2] % (NUMBER_OF_MUTATIONS + 1));
 
         char nonceHex[65];
