@@ -24,8 +24,8 @@ struct Bpp9000Config
 };
 
 // Production config. The frame slides one week ahead at most.
-using ProdConfig = Bpp9000Config<18, 1, 24 * 365, 24 * 28, 100000, 3, 2048, 1000,
-                             (unsigned int)(24 * 28 * 45 / 100), 24 * 7>;
+using ProdConfig = Bpp9000Config<18, 1, 24 * 365 + 24 * 7, 24 * 365, 100000, 3, 2048, 1000,
+                             (unsigned int)(24 * 365 * 45 / 100), 24 * 7>;
 
 // Regression configs that all SUBVIEW-load from the one full production task file
 // but reduce some params for faster test. Their frames carry no calendar meaning, so the
@@ -33,7 +33,7 @@ using ProdConfig = Bpp9000Config<18, 1, 24 * 365, 24 * 28, 100000, 3, 2048, 1000
 using ConfigA = Bpp9000Config<18, 1, 128,      32,      5000,   3, 64, 10, (unsigned int)(32 * 45 / 100),      32 / 4>;
 using ConfigB = Bpp9000Config<18, 1, 512,      128,     20000,  3, 64, 15, (unsigned int)(128 * 45 / 100),     128 / 4>;
 using ConfigC = Bpp9000Config<18, 1, 2048,     512,     80000,  3, 64, 20, (unsigned int)(512 * 45 / 100),     512 / 4>;
-using ConfigD = Bpp9000Config<18, 1, 24 * 365, 24 * 28, 100000, 3, 64, 5,  (unsigned int)(24 * 28 * 45 / 100), 24 * 7>;
+using ConfigD = Bpp9000Config<18, 1, 24 * 365 + 24 * 7, 24 * 365, 100000, 3, 64, 5,  (unsigned int)(24 * 365 * 45 / 100), 24 * 7>;
 using ConfigList = std::tuple<ConfigA, ConfigB, ConfigC, ConfigD>;
 
 }
