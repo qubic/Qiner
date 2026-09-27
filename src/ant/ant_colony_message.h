@@ -96,7 +96,7 @@ static_assert(sizeof(RequestAntParentAnn) == 8, "RequestAntParentAnn unexpected 
 // RespondAntParentAnnHeader.status values.
 static constexpr unsigned char ANT_PARENT_ANN_STATUS_OK = 0;        // ANN bytes follow the header
 static constexpr unsigned char ANT_PARENT_ANN_STATUS_NOT_FOUND = 1; // parentRef has no record
-static constexpr unsigned char ANT_PARENT_ANN_STATUS_IS_ROOT = 2;   // ROOT_REF; no ANN payload - miner derives the shared epoch root
+static constexpr unsigned char ANT_PARENT_ANN_STATUS_IS_ROOT = 2;   // ROOT_REF; no ANN payload - miner derives its own root
 
 // On status Ok, annSizeBytes bytes of the ANN follow - the full exchanged form (wiring + start state +
 // LUTs), the same bytes the scorer inherits. 0 for every other status.
@@ -116,7 +116,8 @@ static_assert(sizeof(RespondAntParentAnnHeader) == 16, "RespondAntParentAnnHeade
 #pragma pack(push, 1)
 struct RespondAntEpochContext
 {
-    unsigned char spectrumDigest[32];   // the shared root seed; SEEDS the random2 pool, root = deriveRootANN(spectrumDigest)
+    unsigned char spectrumDigest[32];   // epoch-start digest; SEEDS the random2 pool. The root is per identity:
+                                        // deriveRootANN(own public key, that pool)
     unsigned char topologyHash[32];     // canonical task topology-block hash (BPP9000_TOPOLOGY_HASH)
     unsigned char dataHash[32];         // canonical task data-block hash (BPP9000_DATA_HASH)
     unsigned int threshold;             // score threshold for this epoch (lowered on the test node)

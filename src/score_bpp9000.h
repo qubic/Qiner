@@ -24,7 +24,6 @@ static constexpr unsigned long long MAX_NUMBER_OF_TICKS = 100000;
 static constexpr unsigned int MAX_CHANGES_PER_STEP = 10;
 static constexpr unsigned long long SEQUENCE_LENGTH = 24 * 365 + 24 * 7;
 static constexpr unsigned long long WINDOW_WIDTH = 24 * 365;
-static constexpr unsigned long long NUMBER_OF_WINDOWS = SEQUENCE_LENGTH - WINDOW_WIDTH;
 
 // How far the frame may slide: production predicts one week ahead.
 static constexpr unsigned long long SHIFT_CAP = 24 * 7;
