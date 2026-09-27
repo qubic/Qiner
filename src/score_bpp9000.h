@@ -16,7 +16,7 @@ namespace score_bpp9000
 
 static constexpr unsigned long long NUMBER_OF_INPUT_NEURONS = 18;
 static constexpr unsigned long long NUMBER_OF_OUTPUT_NEURONS = 1;
-static constexpr unsigned long long POPULATION_THRESHOLD = 2048;
+static constexpr unsigned long long POPULATION_THRESHOLD = 64;
 static constexpr unsigned long long NUMBER_OF_NEIGHBORS = 3;
 static constexpr unsigned long long NUMBER_OF_MUTATIONS = 1000;
 static constexpr unsigned long long MAX_NUMBER_OF_TICKS = 100000;
