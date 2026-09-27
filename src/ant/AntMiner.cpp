@@ -82,7 +82,11 @@ static int nodePort = 0;
 static int waitForResponse(ServerSocket& sock, unsigned char wantedType, char* payload, unsigned int payloadCapacity)
 {
     static char scratch[1024 * 1024];
-    for (int attempt = 0; attempt < 64; attempt++)
+    // A busy node streams ticks and votes to every connected peer, so the reply can sit behind a
+    // long run of unrelated broadcasts. Bound the skip by wall clock, not by a message count.
+    const std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (std::chrono::steady_clock::now() < deadline)
     {
         RequestResponseHeader header;
         if (!sock.receiveData((char*)&header, sizeof(header)))
@@ -165,7 +169,11 @@ static int fetchAnchorDigest(ServerSocket& sock, unsigned int anchorTick, unsign
 
     static unsigned char tickData[TICK_DATA_SIZE];
 
-    for (int attempt = 0; attempt < 64; attempt++)
+    // A busy node streams ticks and votes to every connected peer, so the reply can sit behind a
+    // long run of unrelated broadcasts. Bound the skip by wall clock, not by a message count.
+    const std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (std::chrono::steady_clock::now() < deadline)
     {
         RequestResponseHeader header;
         if (!sock.receiveData((char*)&header, sizeof(header)))
@@ -1084,6 +1092,7 @@ int main(int argc, char* argv[])
             unsigned int attempted = 0;
             unsigned int checkedNow = 0;
             unsigned int mismatches = 0;
+            unsigned int swaps = 0;
             unsigned int unavailable = 0;
             bool netFailed = false;
             for (OwnNode& node : ownNodes)
@@ -1110,16 +1119,71 @@ int main(int argc, char* argv[])
                 checkedNow++;
                 if (!annMatchesStored(node.ann, storedAnn))
                 {
+                    // A listing entry carries no nonce, so two submissions sharing
+                    // (score, anchorTick, depth, parentRef) can be bound to each other's selfRef.
+                    // The ANN is the real discriminator: when a twin's local network is what the
+                    // node stored at this ref, the two refs were merely crossed. Swap them back;
+                    // this fetch has verified the twin.
+                    OwnNode* twin = nullptr;
+                    for (OwnNode& candidate : ownNodes)
+                    {
+                        if (&candidate == &node || !candidate.refKnown || candidate.lutChecked)
+                        {
+                            continue;
+                        }
+                        if (candidate.score == node.score
+                            && candidate.anchorTick == node.anchorTick
+                            && candidate.depth == node.depth
+                            && candidate.parentTick == node.parentTick
+                            && candidate.parentSolutionIndexInTick == node.parentSolutionIndexInTick
+                            && annMatchesStored(candidate.ann, storedAnn))
+                        {
+                            twin = &candidate;
+                            break;
+                        }
+                    }
+                    if (twin != nullptr)
+                    {
+                        const unsigned int crossedTick = node.selfTick;
+                        const unsigned int crossedIndex = node.selfSolutionIndexInTick;
+                        node.selfTick = twin->selfTick;
+                        node.selfSolutionIndexInTick = twin->selfSolutionIndexInTick;
+                        twin->selfTick = crossedTick;
+                        twin->selfSolutionIndexInTick = crossedIndex;
+                        twin->lutChecked = true;
+                        // Its ref changed, so it has to be fetched again on the new one.
+                        node.lutChecked = false;
+                        swaps++;
+                        continue;
+                    }
                     node.lutMismatch = true;
                     mismatches++;
-                    printf("WARNING: LUT mismatch for own node (tick %u, index %u, score %u) - local ANN differs from the node's stored ANN, excluded from parent selection\n",
-                        node.selfTick, node.selfSolutionIndexInTick, node.score);
+                    unsigned char localDigest[32];
+                    unsigned char storedDigest[32];
+                    KangarooTwelve((const unsigned char*)&node.ann, ANN_BYTES, localDigest, 32);
+                    KangarooTwelve(storedAnn, ANN_BYTES, storedDigest, 32);
+                    unsigned long long localPrefix = 0;
+                    unsigned long long storedPrefix = 0;
+                    memcpy(&localPrefix, localDigest, 8);
+                    memcpy(&storedPrefix, storedDigest, 8);
+                    printf("WARNING: LUT mismatch for own node (tick %u, index %u, score %u, depth %u, anchor %u, parent %u/%u)\n",
+                        node.selfTick, node.selfSolutionIndexInTick, node.score, node.depth,
+                        node.anchorTick, node.parentTick, node.parentSolutionIndexInTick);
+                    printf("         no twin holds this network, so the refs are not merely crossed: the node scored this nonce differently\n");
+                    printf("         local ANN K12 %016llx, stored ANN K12 %016llx, nonce ",
+                        localPrefix, storedPrefix);
+                    for (int b = 0; b < 32; b++)
+                    {
+                        printf("%02x", node.nonce[b]);
+                    }
+                    printf("\n         excluded from parent selection\n");
                 }
             }
             if (attempted)
             {
-                printf("LUT check: attempted %u, verified %u, mismatched %u, unavailable %u%s\n",
-                    attempted, checkedNow, mismatches, unavailable, netFailed ? ", aborted on network failure" : "");
+                printf("LUT check: attempted %u, verified %u, mismatched %u, crossed-refs repaired %u, unavailable %u%s\n",
+                    attempted, checkedNow, mismatches, swaps, unavailable,
+                    netFailed ? ", aborted on network failure" : "");
             }
         }
 
@@ -1134,6 +1198,7 @@ int main(int argc, char* argv[])
             {
                 listing = entries;
                 unsigned int resolved = 0;
+                unsigned int ambiguous = 0;
 
                 // A listing entry carries no nonce, so a submission is matched on
                 // (score, anchorTick, depth, parentRef). Two of our hits can share that tuple, so
@@ -1187,14 +1252,37 @@ int main(int argc, char* argv[])
                     }
                     if (!node.refKnown)
                     {
+                        // Every tuple-identical entry is already bound to an earlier submission.
+                        // This one is on-chain too, it just cannot be told apart from its twin, so
+                        // it stays without a selfRef of its own and is not a failure.
+                        bool twinIsOnChain = false;
+                        for (size_t e = 0; e < entries.size(); e++)
+                        {
+                            const AntIdentityTreeNode& entry = entries[e];
+                            if (entry.score == node.score
+                                && entry.anchorTick == node.anchorTick
+                                && entry.depth == node.depth
+                                && entry.parentTick == node.parentTick
+                                && entry.parentSolutionIndexInTick == node.parentSolutionIndexInTick)
+                            {
+                                twinIsOnChain = true;
+                                break;
+                            }
+                        }
+                        if (twinIsOnChain)
+                        {
+                            ambiguous++;
+                            continue;
+                        }
                         node.resolveAttempts++;
                         if (node.resolveAttempts == 3U)
                         {
-                            // The node recomputes the score from (pubkey, parentRef, anchorTick,
-                            // nonce); if our score never appears on-chain, the recomputation
-                            // disagreed with ours - the anchor digest is the prime suspect.
-                            printf("WARNING: solution (score %u, anchor %u) not accepted after %u resolve cycles - possible anchor digest mismatch, compare 'Anchor tick N digest=' with the node's F3 line\n",
-                                node.score, node.anchorTick, node.resolveAttempts);
+                            // Ant solutions travel as BroadcastMessage, which carries no reject
+                            // reply, so the reason a submission never reached the tree is only in
+                            // the node log.
+                            printf("WARNING: solution (score %u, anchor %u, parent %u/%u) not in the identity tree after %u resolve cycles - check the node log for '[ant-colony] pool drop'\n",
+                                node.score, node.anchorTick, node.parentTick,
+                                node.parentSolutionIndexInTick, node.resolveAttempts);
                         }
                     }
                 }
@@ -1204,8 +1292,9 @@ int main(int argc, char* argv[])
                 {
                     epochContext = refreshed;
                 }
-                printf("| %llu iterations | %llu submitted | %llu stale-skipped | max-anchor-age %u/%u | %u/%zu accepted+resolved | tree size %u |\n",
-                    gIterations.load(), submitted, staleSkipped, maxSubmitAge, epochContext.freshnessWindow, resolved, ownNodes.size(), epochContext.solutionCount);
+                printf("| %llu iterations | %llu submitted | %llu stale-skipped | max-anchor-age %u/%u | %u/%zu accepted+resolved | %u tuple-ambiguous | tree size %u |\n",
+                    gIterations.load(), submitted, staleSkipped, maxSubmitAge, epochContext.freshnessWindow,
+                    resolved, ownNodes.size(), ambiguous, epochContext.solutionCount);
             }
             else
             {

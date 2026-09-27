@@ -1,6 +1,7 @@
 // Usage:
 //   broadcastMessageSolution <Node IP> <Node Port> <MiningID> <Signing Seed> <Mining Seed hex> [score=-1] [count=1] [intervalMs=0]
-//     score      : 0..8088 encodes an exact error (good if below the node threshold, bad if above);
+//     score      : 0..8760 (WINDOW_WIDTH) encodes an exact error (good if below the node threshold,
+//                  bad if above);
 //                  < 0 (default) uses a random score per solution.
 //     count      : number of solutions to send (default 1).
 //     intervalMs : delay between sends (default 0).
@@ -336,7 +337,7 @@ int main(int argc, char* argv[])
             // Send the given nonce verbatim - identical every iteration, so the node dedups all but the
             // first. The score must match what the node decodes from nonce[30..31].
             memcpy(nonce, fixedNonce, 32);
-            target = ((unsigned int)nonce[30] | ((unsigned int)nonce[31] << 8)) % (score_bpp9000::NUMBER_OF_WINDOWS + 1);
+            target = ((unsigned int)nonce[30] | ((unsigned int)nonce[31] << 8)) % (score_bpp9000::WINDOW_WIDTH + 1);
         }
         else
         {
@@ -356,13 +357,13 @@ int main(int argc, char* argv[])
 
             if (score >= 0)
             {
-                target = (unsigned int)score % (score_bpp9000::NUMBER_OF_WINDOWS + 1);
+                target = (unsigned int)score % (score_bpp9000::WINDOW_WIDTH + 1);
             }
             else
             {
                 unsigned int r = 0;
                 _rdrand32_step(&r);
-                target = r % (score_bpp9000::NUMBER_OF_WINDOWS + 1);
+                target = r % (score_bpp9000::WINDOW_WIDTH + 1);
             }
             nonce[30] = (unsigned char)(target & 0xFF);
             nonce[31] = (unsigned char)((target >> 8) & 0xFF);

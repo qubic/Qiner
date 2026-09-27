@@ -8,6 +8,10 @@
 // disabled for the testnet). Every gate other than the claim check still applies, so only genuinely
 // valid solutions are accepted.
 //
+// The run reads the epoch context before and after, so it reports how many solutions the node
+// accepted rather than only how many were sent. That counter is network-wide, so with other miners
+// active it is a floor on this run's contribution.
+//
 // Usage:
 //   broadcastAntSolution <Node IP> <Node Port> <MiningID> <Signing Seed> [count=1] [intervalMs=0] [-operator <Operator Seed>]
 //     MiningID   : the computor the solution is FOR - tree owner, deposit payer, broadcast destination.
@@ -40,16 +44,22 @@
 
 // bpp9000 canonical-nonce knobs (core src/mining/score_bpp9000.h):
 // nonce[0] == 1 selects Bpp9000, nonce[1] = L in [1, 10] (bits 0-3) + mode in [1, 3] (bits 4-5),
-// nonce[2] = K in [0, 100] for ant.
+// nonce[2] = K, the explore-step count. isCanonicalAntNonce accepts K <= BPP9000_NUMBER_OF_MUTATIONS,
+// which is 1000, so every value a byte can hold is canonical and K needs no masking. K does not change
+// what a solution costs to verify: the walk always runs all 1000 steps, K only decides how many of them
+// use the explore rule instead of the exploit rule.
 static constexpr unsigned char ALGO_BPP9000 = 1;
 static constexpr unsigned int MAX_CHANGES_PER_STEP = 10;
-static constexpr unsigned int NUMBER_OF_MUTATIONS = 100;
 
 // --- request/response helpers (from src/AntMiner.cpp) ---
 static int waitForResponse(ServerSocket& sock, unsigned char wantedType, char* payload, unsigned int payloadCapacity)
 {
     static char scratch[1024 * 1024];
-    for (int attempt = 0; attempt < 64; attempt++)
+    // A busy node streams ticks and votes to every connected peer, so the reply can sit behind a
+    // long run of unrelated broadcasts. Bound the skip by wall clock, not by a message count.
+    const std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (std::chrono::steady_clock::now() < deadline)
     {
         RequestResponseHeader header;
         if (!sock.receiveData((char*)&header, sizeof(header)))
@@ -107,6 +117,26 @@ static bool queryCurrentTickInfo(ServerSocket& sock, RespondCurrentTickInfo& out
         return false;
     }
     return waitForResponse(sock, RESPOND_CURRENT_TICK_INFO, (char*)&out, sizeof(out)) == (int)sizeof(out);
+}
+
+// Public (unsigned) read of the epoch's mining parameters. Worth doing before a run: if the node is
+// not on the expected threshold or freshness window, every solution below will be rejected and the
+// send loop cannot tell the difference from a send that simply never landed.
+static bool queryEpochContext(ServerSocket& sock, RespondAntEpochContext& out)
+{
+    if (!sendRequest(sock, REQUEST_ANT_EPOCH_CONTEXT, NULL, 0))
+    {
+        return false;
+    }
+    return waitForResponse(sock, RESPOND_ANT_EPOCH_CONTEXT, (char*)&out, sizeof(out)) == (int)sizeof(out);
+}
+
+static void printEpochContext(const char* label, const RespondAntEpochContext& ctx)
+{
+    printf("%s epoch %u, threshold %u, freshness window %u ticks, maxChildrenPerParent %u\n",
+        label, (unsigned int)ctx.epoch, ctx.threshold, ctx.freshnessWindow, ctx.maxChildrenPerParent);
+    printf("%s solutions accepted so far %u, free ANN slots %u\n",
+        label, ctx.solutionCount, ctx.freeAnnSlotsCount);
 }
 
 // Operator-signed read of one identity's tree (one page; caller loops on nextIndex). Signed with the
@@ -333,6 +363,19 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+    // Baseline before sending, so the run can report how many of its solutions the node actually
+    // accepted rather than only how many were put on the wire.
+    RespondAntEpochContext ctxBefore;
+    const bool haveCtxBefore = queryEpochContext(sock, ctxBefore);
+    if (haveCtxBefore)
+    {
+        printEpochContext("  before:", ctxBefore);
+    }
+    else
+    {
+        printf("  before: epoch context unavailable - acceptance cannot be reported\n");
+    }
+
     unsigned int sent = 0;
     std::vector<AntIdentityTreeNode> listing;   // this identity's accepted nodes (for deeper extension)
     for (int c = 0; c < count; c++)
@@ -378,7 +421,7 @@ int main(int argc, char* argv[])
         const unsigned char L = (unsigned char)((nonce[1] % MAX_CHANGES_PER_STEP) + 1);
         const unsigned char mode = (unsigned char)(((nonce[1] >> 4) % 3) + 1);
         nonce[1] = (unsigned char)(L | (mode << 4));
-        nonce[2] = (unsigned char)(nonce[2] % (NUMBER_OF_MUTATIONS + 1));
+        // nonce[2] is K and every byte is canonical, so the random byte stands.
 
         char nonceHex[65];
         for (int i = 0; i < 32; i++)
@@ -416,7 +459,70 @@ int main(int argc, char* argv[])
         }
     }
 
+    // A solution is not committed when it arrives: the node publishes it into a later tick and
+    // commits it only once that tick is processed, so the counter lags the send by several ticks.
+    static const unsigned int SETTLE_POLL_MS = 1000;
+    static const unsigned int SETTLE_TIMEOUT_MS = 60000;
+    RespondAntEpochContext ctxAfter;
+    bool haveCtxAfter = false;
+    unsigned int waitedMs = 0;
+    while (true)
+    {
+        // A socket collects the node's tick and vote broadcasts for as long as it is open, so a
+        // reply on it sits behind that backlog. Read the counter on one that has none.
+        sock.closeConnection();
+        haveCtxAfter = sock.establishConnection((char*)nodeIp, nodePort)
+            && queryEpochContext(sock, ctxAfter);
+        if (!haveCtxAfter || !haveCtxBefore || sent == 0)
+        {
+            break;
+        }
+        if (ctxAfter.epoch != ctxBefore.epoch)
+        {
+            break;
+        }
+        if (ctxAfter.solutionCount >= ctxBefore.solutionCount
+            && (ctxAfter.solutionCount - ctxBefore.solutionCount) >= sent)
+        {
+            break;
+        }
+        if (waitedMs >= SETTLE_TIMEOUT_MS)
+        {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(SETTLE_POLL_MS));
+        waitedMs += SETTLE_POLL_MS;
+    }
     sock.closeConnection();
+
     printf("Done. %u/%d ant solutions sent.\n", sent, count);
+    if (haveCtxBefore && haveCtxAfter)
+    {
+        printEpochContext("  after: ", ctxAfter);
+        if (ctxAfter.epoch != ctxBefore.epoch)
+        {
+            printf("  epoch changed %u -> %u during the run; the counter restarted, so this run"
+                   " cannot be measured by it\n", ctxBefore.epoch, ctxAfter.epoch);
+            return 0;
+        }
+        // The counter is network-wide, so anything else mining this epoch is counted here too; it is a
+        // floor on what this run achieved, not an exact attribution.
+        const unsigned int grew = (ctxAfter.solutionCount >= ctxBefore.solutionCount)
+            ? (ctxAfter.solutionCount - ctxBefore.solutionCount) : 0U;
+        printf("  tree grew by %u accepted solutions while %u were sent (waited %u ms for them to"
+               " commit)\n", grew, sent, waitedMs);
+        if (grew == 0 && sent > 0)
+        {
+            printf("  nothing was accepted - the node log says why on its '[ant-colony] pool drop'"
+                   " lines; 'unacceptable' just means the nonce missed the threshold above, which is"
+                   " normal for a small batch\n");
+        }
+        else if (grew < sent)
+        {
+            printf("  %u of %u had not committed within %u ms - re-run to read the counter again,"
+                   " or check the node log for '[ant-colony] pool drop'\n",
+                sent - grew, sent, SETTLE_TIMEOUT_MS);
+        }
+    }
     return 0;
 }
