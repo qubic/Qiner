@@ -2,7 +2,6 @@ project(qiner_test LANGUAGES C CXX)
 
 add_executable(${PROJECT_NAME}
     main.cpp
-    bpp9000_ant_colony_test.cpp
     # score_addition_test.cpp  # obsolete: targets the removed synapse-buffer architecture; needs a LUT rewrite
     )
 
