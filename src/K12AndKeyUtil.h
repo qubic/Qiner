@@ -1020,7 +1020,11 @@ static void fpneg1271(felm_t a)
     a[0] = ~a[0];
     a[1] = 0x7FFFFFFFFFFFFFFF - a[1];
 }
-#ifndef _MSC_VER
+// mingw-w64 supplies _umul128, __shiftleft128 and __shiftright128 itself, so
+// defining them here as well collides: "declared 'extern' and later 'static'".
+// Guarding on _MSC_VER alone treats every non-MSVC target as lacking them,
+// which is only true for Unix-like toolchains.
+#if !defined(_MSC_VER) && !defined(__MINGW32__)
 static uint64_t _umul128(uint64_t a, uint64_t b, long long unsigned int *hi)
 {
     union { unsigned __int128 v; uint64_t sv[2]; } var;

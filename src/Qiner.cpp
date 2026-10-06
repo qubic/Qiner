@@ -7,11 +7,15 @@
 #include <queue>
 #include <atomic>
 #include <assert.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #ifdef _MSC_VER
 #include <intrin.h>
-#include <winsock2.h>
 #pragma comment (lib, "ws2_32.lib")
-
+#else
+#include <immintrin.h>
+#endif
 #else
 #include <signal.h>
 #include <immintrin.h>
@@ -115,7 +119,7 @@ struct FoundSolution
 static std::queue<FoundSolution> foundNonce;
 std::mutex foundNonceLock;
 
-#ifdef _MSC_VER
+#ifdef _WIN32
 static BOOL WINAPI ctrlCHandlerRoutine(DWORD dwCtrlType)
 {
     if (!state)
@@ -144,7 +148,7 @@ void ctrlCHandlerRoutine(int signum)
 
 void consoleCtrlHandler()
 {
-#ifdef _MSC_VER
+#ifdef _WIN32
     SetConsoleCtrlHandler(ctrlCHandlerRoutine, TRUE);
 #else
     signal(SIGINT, ctrlCHandlerRoutine);
@@ -237,7 +241,7 @@ int miningThreadProc()
 
 struct ServerSocket
 {
-#ifdef _MSC_VER
+#ifdef _WIN32
     ServerSocket()
     {
         WSADATA wsaData;
@@ -264,13 +268,18 @@ struct ServerSocket
         }
 
         sockaddr_in addr;
-        ZeroMemory(&addr, sizeof(addr));
+        memset(&addr, 0, sizeof(addr));
         addr.sin_family = AF_INET;
         addr.sin_port = htons(nodePort);
-        sscanf_s(address, "%hhu.%hhu.%hhu.%hhu", &addr.sin_addr.S_un.S_un_b.s_b1, &addr.sin_addr.S_un.S_un_b.s_b2, &addr.sin_addr.S_un.S_un_b.s_b3, &addr.sin_addr.S_un.S_un_b.s_b4);
+        if (inet_pton(AF_INET, address, &addr.sin_addr) <= 0)
+        {
+            printf("Invalid address (%s)\n", address);
+            closeConnection();
+            return false;
+        }
         if (connect(serverSocket, (const sockaddr*)&addr, sizeof(addr)))
         {
-            printf("Fail to connect to %d.%d.%d.%d (%d)!\n", addr.sin_addr.S_un.S_un_b.s_b1, addr.sin_addr.S_un.S_un_b.s_b2, addr.sin_addr.S_un.S_un_b.s_b3, addr.sin_addr.S_un.S_un_b.s_b4, WSAGetLastError());
+            printf("Fail to connect to %s (%d)!\n", address, WSAGetLastError());
             closeConnection();
             return false;
         }

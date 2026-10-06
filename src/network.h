@@ -5,10 +5,15 @@
 #include <cstdio>
 #include <cstring>
 
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #ifdef _MSC_VER
 #include <intrin.h>
-#include <winsock2.h>
 #pragma comment (lib, "ws2_32.lib")
+#else
+#include <immintrin.h>
+#endif
 #else
 #include <errno.h>
 #include <immintrin.h>
@@ -88,7 +93,7 @@ typedef struct
 
 struct ServerSocket
 {
-#ifdef _MSC_VER
+#ifdef _WIN32
     ServerSocket()
     {
         WSADATA wsaData;
@@ -117,10 +122,15 @@ struct ServerSocket
         setsockopt(serverSocket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeoutMs, sizeof(timeoutMs));
 
         sockaddr_in addr;
-        ZeroMemory(&addr, sizeof(addr));
+        memset(&addr, 0, sizeof(addr));
         addr.sin_family = AF_INET;
         addr.sin_port = htons(port);
-        sscanf_s(address, "%hhu.%hhu.%hhu.%hhu", &addr.sin_addr.S_un.S_un_b.s_b1, &addr.sin_addr.S_un.S_un_b.s_b2, &addr.sin_addr.S_un.S_un_b.s_b3, &addr.sin_addr.S_un.S_un_b.s_b4);
+        if (inet_pton(AF_INET, address, &addr.sin_addr) <= 0)
+        {
+            printf("Invalid address (%s)\n", address);
+            closeConnection();
+            return false;
+        }
         if (connect(serverSocket, (const sockaddr*)&addr, sizeof(addr)))
         {
             printf("Fail to connect to %s (%d)!\n", address, WSAGetLastError());
