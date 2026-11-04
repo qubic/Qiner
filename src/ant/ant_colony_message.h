@@ -23,6 +23,9 @@
 static constexpr unsigned int ROOT_TICK = 0U;
 static constexpr unsigned int ROOT_INDEX_IN_TICK = 0xFFFFFFFFU;
 
+// A solution recorded at tick T is committed and refunded at T + this and can be a parent from T + this + 1.
+static constexpr unsigned int ANT_SETTLEMENT_WINDOW_TICKS = 64;
+
 static constexpr unsigned int SIGNATURE_SIZE = 64;
 
 struct RespondCurrentTickInfo

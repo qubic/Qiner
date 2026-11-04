@@ -82,7 +82,10 @@ static int nodePort = 0;
 static int waitForResponse(ServerSocket& sock, unsigned char wantedType, char* payload, unsigned int payloadCapacity)
 {
     static char scratch[1024 * 1024];
-    for (int attempt = 0; attempt < 64; attempt++)
+    // The reply can sit behind many tick and vote broadcasts: bound the skip by time, not by count.
+    const std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (std::chrono::steady_clock::now() < deadline)
     {
         RequestResponseHeader header;
         if (!sock.receiveData((char*)&header, sizeof(header)))
@@ -165,7 +168,10 @@ static int fetchAnchorDigest(ServerSocket& sock, unsigned int anchorTick, unsign
 
     static unsigned char tickData[TICK_DATA_SIZE];
 
-    for (int attempt = 0; attempt < 64; attempt++)
+    // The reply can sit behind many tick and vote broadcasts: bound the skip by time, not by count.
+    const std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (std::chrono::steady_clock::now() < deadline)
     {
         RequestResponseHeader header;
         if (!sock.receiveData((char*)&header, sizeof(header)))
@@ -380,7 +386,8 @@ struct OwnNode
     bool refKnown;                          // selfRef learned from the node's identity-tree listing
     bool lutChecked;                        // local ANN verified once against the node's stored ANN
     bool lutMismatch;                       // stored ANN differed; never extend this node
-    unsigned int resolveAttempts;           // resolve cycles seen while still unresolved (mismatch detector)
+    unsigned int submitTick;                // tick at submission
+    bool resolveWarned;                     // unresolved warning printed
     unsigned int selfTick;
     unsigned int selfSolutionIndexInTick;
     AntMinerT::ANN ann;                     // this node's evolved ANN (best network at mining time)
@@ -1051,7 +1058,8 @@ int main(int argc, char* argv[])
                 node.refKnown = false;
                 node.lutChecked = false;
                 node.lutMismatch = false;
-                node.resolveAttempts = 0;
+                node.submitTick = tickInfo.tick;
+                node.resolveWarned = false;
                 node.selfTick = 0;
                 node.selfSolutionIndexInTick = 0;
                 memcpy(&node.ann, &r.ann, sizeof(AntMinerT::ANN));
@@ -1185,17 +1193,16 @@ int main(int argc, char* argv[])
                             break;
                         }
                     }
-                    if (!node.refKnown)
+                    if (!node.refKnown && !node.resolveWarned
+                        && tickInfo.tick > node.submitTick + 2U * ANT_SETTLEMENT_WINDOW_TICKS)
                     {
-                        node.resolveAttempts++;
-                        if (node.resolveAttempts == 3U)
-                        {
-                            // The node recomputes the score from (pubkey, parentRef, anchorTick,
-                            // nonce); if our score never appears on-chain, the recomputation
-                            // disagreed with ours - the anchor digest is the prime suspect.
-                            printf("WARNING: solution (score %u, anchor %u) not accepted after %u resolve cycles - possible anchor digest mismatch, compare 'Anchor tick N digest=' with the node's F3 line\n",
-                                node.score, node.anchorTick, node.resolveAttempts);
-                        }
+                        // A submission enters the listing one settlement window after the node
+                        // publishes it; twice that is past anything still on its way. The node
+                        // sends no reject reply.
+                        node.resolveWarned = true;
+                        printf("WARNING: solution (score %u, anchor %u, parent %u/%u) is not in the identity tree %u ticks after submission - the node dropped it; its F3 'AntPool:' line counts the drops by reason (claim mismatch = its score differs from ours, check the anchor digest)\n",
+                            node.score, node.anchorTick, node.parentTick, node.parentSolutionIndexInTick,
+                            tickInfo.tick - node.submitTick);
                     }
                 }
 

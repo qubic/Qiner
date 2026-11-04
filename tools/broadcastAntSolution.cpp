@@ -8,6 +8,9 @@
 // disabled for the testnet). Every gate other than the claim check still applies, so only genuinely
 // valid solutions are accepted.
 //
+// Reports how many solutions the node committed, not only how many were sent. The counter is
+// network-wide, so with other miners active it is a floor.
+//
 // Usage:
 //   broadcastAntSolution <Node IP> <Node Port> <MiningID> <Signing Seed> [count=1] [intervalMs=0] [-operator <Operator Seed>]
 //     MiningID   : the computor the solution is FOR - tree owner, deposit payer, broadcast destination.
@@ -40,16 +43,18 @@
 
 // bpp9000 canonical-nonce knobs (core src/mining/score_bpp9000.h):
 // nonce[0] == 1 selects Bpp9000, nonce[1] = L in [1, 10] (bits 0-3) + mode in [1, 3] (bits 4-5),
-// nonce[2] = K in [0, 100] for ant.
+// nonce[2] = K, the explore-step count; every byte value is canonical (K <= 1000), so no masking.
 static constexpr unsigned char ALGO_BPP9000 = 1;
 static constexpr unsigned int MAX_CHANGES_PER_STEP = 10;
-static constexpr unsigned int NUMBER_OF_MUTATIONS = 100;
 
 // --- request/response helpers (from src/AntMiner.cpp) ---
 static int waitForResponse(ServerSocket& sock, unsigned char wantedType, char* payload, unsigned int payloadCapacity)
 {
     static char scratch[1024 * 1024];
-    for (int attempt = 0; attempt < 64; attempt++)
+    // The reply can sit behind many tick and vote broadcasts: bound the skip by time, not by count.
+    const std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (std::chrono::steady_clock::now() < deadline)
     {
         RequestResponseHeader header;
         if (!sock.receiveData((char*)&header, sizeof(header)))
@@ -107,6 +112,25 @@ static bool queryCurrentTickInfo(ServerSocket& sock, RespondCurrentTickInfo& out
         return false;
     }
     return waitForResponse(sock, RESPOND_CURRENT_TICK_INFO, (char*)&out, sizeof(out)) == (int)sizeof(out);
+}
+
+// Unsigned read of the epoch's mining parameters. A node on another threshold or freshness window
+// rejects every solution, which the send loop cannot tell from a send that never landed.
+static bool queryEpochContext(ServerSocket& sock, RespondAntEpochContext& out)
+{
+    if (!sendRequest(sock, REQUEST_ANT_EPOCH_CONTEXT, NULL, 0))
+    {
+        return false;
+    }
+    return waitForResponse(sock, RESPOND_ANT_EPOCH_CONTEXT, (char*)&out, sizeof(out)) == (int)sizeof(out);
+}
+
+static void printEpochContext(const char* label, const RespondAntEpochContext& ctx)
+{
+    printf("%s epoch %u, threshold %u, freshness window %u ticks, maxChildrenPerParent %u\n",
+        label, (unsigned int)ctx.epoch, ctx.threshold, ctx.freshnessWindow, ctx.maxChildrenPerParent);
+    printf("%s solutions accepted so far %u, free ANN slots %u\n",
+        label, ctx.solutionCount, ctx.freeAnnSlotsCount);
 }
 
 // Operator-signed read of one identity's tree (one page; caller loops on nextIndex). Signed with the
@@ -333,6 +357,18 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+    // Baseline for the committed count.
+    RespondAntEpochContext ctxBefore;
+    const bool haveCtxBefore = queryEpochContext(sock, ctxBefore);
+    if (haveCtxBefore)
+    {
+        printEpochContext("  before:", ctxBefore);
+    }
+    else
+    {
+        printf("  before: epoch context unavailable - acceptance cannot be reported\n");
+    }
+
     unsigned int sent = 0;
     std::vector<AntIdentityTreeNode> listing;   // this identity's accepted nodes (for deeper extension)
     for (int c = 0; c < count; c++)
@@ -378,7 +414,7 @@ int main(int argc, char* argv[])
         const unsigned char L = (unsigned char)((nonce[1] % MAX_CHANGES_PER_STEP) + 1);
         const unsigned char mode = (unsigned char)(((nonce[1] >> 4) % 3) + 1);
         nonce[1] = (unsigned char)(L | (mode << 4));
-        nonce[2] = (unsigned char)(nonce[2] % (NUMBER_OF_MUTATIONS + 1));
+        // nonce[2] = K: every byte is canonical.
 
         char nonceHex[65];
         for (int i = 0; i < 32; i++)
@@ -416,7 +452,96 @@ int main(int argc, char* argv[])
         }
     }
 
+    // The node publishes at most one queued solution per tick per MiningID and commits it one
+    // settlement window later, so the counter keeps rising after the run. Wait until every send is
+    // counted or the counter has not moved for two windows. A stalled network does not advance the
+    // tick, so the wait holds.
+    static const unsigned int SETTLE_POLL_MS = 1000;
+    static const unsigned int SETTLE_PROGRESS_MS = 10000;
+    static const unsigned int SETTLE_IDLE_TICKS = 2U * ANT_SETTLEMENT_WINDOW_TICKS;
+    RespondAntEpochContext ctxAfter;
+    bool haveCtxAfter = false;
+    unsigned int waitedMs = 0;
+    bool tracking = false;
+    bool settledIdle = false;
+    unsigned int lastCount = 0;
+    unsigned int lastGrowthTick = 0;
+    while (true)
+    {
+        // A fresh connection has no broadcast backlog in front of the reply.
+        sock.closeConnection();
+        haveCtxAfter = sock.establishConnection((char*)nodeIp, nodePort)
+            && queryEpochContext(sock, ctxAfter);
+        RespondCurrentTickInfo tickInfo;
+        const bool haveTick = haveCtxAfter && queryCurrentTickInfo(sock, tickInfo);
+        if (!haveCtxAfter || !haveCtxBefore || sent == 0 || !haveTick)
+        {
+            break;
+        }
+        if (ctxAfter.epoch != ctxBefore.epoch)
+        {
+            break;
+        }
+        const unsigned int grewSoFar = (ctxAfter.solutionCount >= ctxBefore.solutionCount)
+            ? (ctxAfter.solutionCount - ctxBefore.solutionCount) : 0U;
+        if (grewSoFar >= sent)
+        {
+            break;
+        }
+        if (!tracking || ctxAfter.solutionCount != lastCount)
+        {
+            tracking = true;
+            lastCount = ctxAfter.solutionCount;
+            lastGrowthTick = tickInfo.tick;
+        }
+        else if (tickInfo.tick >= lastGrowthTick + SETTLE_IDLE_TICKS)
+        {
+            settledIdle = true;
+            break;
+        }
+        if (waitedMs > 0 && waitedMs % SETTLE_PROGRESS_MS == 0)
+        {
+            printf("  waiting: %u of %u committed, tick %u, no change for %u ticks\n",
+                grewSoFar, sent, tickInfo.tick,
+                (tickInfo.tick >= lastGrowthTick) ? (tickInfo.tick - lastGrowthTick) : 0U);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(SETTLE_POLL_MS));
+        waitedMs += SETTLE_POLL_MS;
+    }
     sock.closeConnection();
+
     printf("Done. %u/%d ant solutions sent.\n", sent, count);
+    if (haveCtxBefore && haveCtxAfter)
+    {
+        printEpochContext("  after: ", ctxAfter);
+        if (ctxAfter.epoch != ctxBefore.epoch)
+        {
+            printf("  epoch changed %u -> %u during the run; the counter restarted, so this run"
+                   " cannot be measured by it\n", ctxBefore.epoch, ctxAfter.epoch);
+            return 0;
+        }
+        // Network-wide counter: other miners this epoch are counted too, so this is a floor.
+        const unsigned int grew = (ctxAfter.solutionCount >= ctxBefore.solutionCount)
+            ? (ctxAfter.solutionCount - ctxBefore.solutionCount) : 0U;
+        printf("  tree grew by %u accepted solutions while %u were sent (waited %u ms for them to"
+               " commit)\n", grew, sent, waitedMs);
+        if (grew < sent && !settledIdle)
+        {
+            printf("  %u of %u had not committed when the node stopped answering - read the counter"
+                   " again with -getantepochcontext\n", sent - grew, sent);
+        }
+        else if (grew == 0 && sent > 0)
+        {
+            printf("  nothing was accepted - the node's F3 'AntPool:' line counts the drops by reason;"
+                   " 'unacceptable' just means the nonce missed the threshold above, which is normal"
+                   " for a small batch\n");
+        }
+        else if (grew < sent)
+        {
+            printf("  %u of %u did not commit: the counter stopped moving for %u ticks, so the node"
+                   " dropped or rejected them - its F3 'AntPool:' line counts the drops by reason\n",
+                sent - grew, sent, SETTLE_IDLE_TICKS);
+        }
+    }
     return 0;
 }
