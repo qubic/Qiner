@@ -18,6 +18,8 @@
 #define RESPOND_ANT_PARENT_ANN 75
 #define REQUEST_ANT_EPOCH_CONTEXT 76
 #define RESPOND_ANT_EPOCH_CONTEXT 77
+#define REQUEST_BPP9000_TASK_DATA 80
+#define RESPOND_BPP9000_TASK_DATA 81
 
 // ROOT sentinel of a parent reference (matches core SolutionRef ROOT_REF).
 static constexpr unsigned int ROOT_TICK = 0U;
@@ -69,7 +71,8 @@ struct RespondAntIdentityTreeHeader
 };
 static_assert(sizeof(RespondAntIdentityTreeHeader) == 12, "RespondAntIdentityTreeHeader unexpected size");
 
-// One stored node of the identity's tree. A child must beat it in (shift, error), and starts its own
+// One stored node of the identity's tree. A child must beat its rating on the data of the child's own
+// anchor tick, which is never below the (shift, error) given here, and starts its own
 // walk at this node's shift. No nonce or identity field, so a miner cannot match an entry to its own
 // submission exactly - see the claim/consume matching in AntMiner.cpp.
 // childCount is counted only up to the cap, so it reads 0 for every entry while the cap is unbound.
@@ -119,9 +122,9 @@ static_assert(sizeof(RespondAntParentAnnHeader) == 16, "RespondAntParentAnnHeade
 #pragma pack(push, 1)
 struct RespondAntEpochContext
 {
-    unsigned char spectrumDigest[32];   // the shared root seed; SEEDS the random2 pool, root = deriveRootANN(spectrumDigest)
-    unsigned char topologyHash[32];     // canonical task topology-block hash (BPP9000_TOPOLOGY_HASH)
-    unsigned char dataHash[32];         // canonical task data-block hash (BPP9000_DATA_HASH)
+    unsigned char spectrumDigest[32];   // epoch-start spectrum digest; seeds the random2 pool every root is drawn from
+    unsigned char topologyHash[32];     // node constant BPP9000_TOPOLOGY_HASH; not used by the miner
+    unsigned char dataHash[32];         // K12 of the epoch's first frame of targets (one byte per hour)
     unsigned int threshold;             // score threshold for this epoch (lowered on the test node)
     unsigned int freshnessWindow;       // N: publish within N ticks of the anchor
     unsigned int solutionCount;         // accepted solutions so far (the tree-growth readout)
@@ -132,6 +135,35 @@ struct RespondAntEpochContext
 };
 #pragma pack(pop)
 static_assert(sizeof(RespondAntEpochContext) == 120, "RespondAntEpochContext unexpected size");
+
+// Task data for one anchor tick (core/src/network_messages/price_feed.h). The node builds the targets
+// from its hourly BTC price series; a solution anchored at anchorTick is graded on the hours stored before
+// that tick, so the frame may slide to shiftLimit and no further.
+struct RequestBpp9000TaskData
+{
+    unsigned int anchorTick;
+};
+static_assert(sizeof(RequestBpp9000TaskData) == 4, "RequestBpp9000TaskData unexpected size");
+
+static constexpr unsigned int BPP9000_TASK_DATA_MAX_TARGETS = 24 * 365 + 24 * 7;
+
+#pragma pack(push, 1)
+// Only the targets known for the anchor tick are sent: one frame plus shiftLimit, none if not valid.
+struct RespondBpp9000TaskData
+{
+    unsigned int tick;                  // node tick when it answered
+    unsigned int anchorTick;
+    unsigned short epoch;
+    unsigned char valid;                // 0: the node has no series or has not processed the ticks before anchorTick
+    unsigned char reserved;
+    unsigned int baseHour;
+    unsigned int shiftLimit;            // last frame a solution with this anchor tick may reach
+    unsigned char targets[BPP9000_TASK_DATA_MAX_TARGETS];   // 0 or 1 per hour
+};
+#pragma pack(pop)
+static constexpr unsigned int RESPOND_BPP9000_TASK_DATA_HEADER_SIZE = 20;
+static_assert(sizeof(RespondBpp9000TaskData) == RESPOND_BPP9000_TASK_DATA_HEADER_SIZE + BPP9000_TASK_DATA_MAX_TARGETS,
+    "RespondBpp9000TaskData unexpected size");
 
 // The payload following a BroadcastMessage(MESSAGE_TYPE_ANT_SOLUTION) header.
 struct AntSolutionBroadcastPayload

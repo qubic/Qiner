@@ -16,7 +16,15 @@ namespace score_bpp9000
 
 static constexpr unsigned long long NUMBER_OF_INPUT_NEURONS = 18;
 static constexpr unsigned long long NUMBER_OF_OUTPUT_NEURONS = 1;
-static constexpr unsigned long long POPULATION_THRESHOLD = 64;
+// Population and advance gate must equal the node's (core public_settings.h). A test network built with
+// other values needs a miner built with the same -DQINER_BPP9000_POPULATION / -DQINER_BPP9000_ADVANCE_THRESHOLD.
+#ifndef QINER_BPP9000_POPULATION
+#define QINER_BPP9000_POPULATION 1024
+#endif
+#ifndef QINER_BPP9000_ADVANCE_THRESHOLD
+#define QINER_BPP9000_ADVANCE_THRESHOLD 3942
+#endif
+static constexpr unsigned long long POPULATION_THRESHOLD = QINER_BPP9000_POPULATION;
 static constexpr unsigned long long NUMBER_OF_NEIGHBORS = 3;
 static constexpr unsigned long long NUMBER_OF_MUTATIONS = 1000;
 static constexpr unsigned long long MAX_NUMBER_OF_TICKS = 100000;
@@ -29,8 +37,12 @@ static constexpr unsigned long long NUMBER_OF_WINDOWS = SEQUENCE_LENGTH - WINDOW
 // How far the frame may slide: production predicts one week ahead.
 static constexpr unsigned long long SHIFT_CAP = 24 * 7;
 
+// The shift advances while the error of the production frame stays at or below this gate.
+static constexpr unsigned int ADVANCE_THRESHOLD = QINER_BPP9000_ADVANCE_THRESHOLD;
+
 // Frame-0 floor. The score is an error inside ONE frame, so it lands in [0, WINDOW_WIDTH].
-static constexpr unsigned int SOLUTION_THRESHOLD = (unsigned int)(WINDOW_WIDTH * 45 / 100);
+// The node sends the epoch's value in its epoch context; this is the mainnet default.
+static constexpr unsigned int SOLUTION_THRESHOLD = (ADVANCE_THRESHOLD < 4350) ? 4350 : (ADVANCE_THRESHOLD + 1);
 
 // Mutation modes, declared by the miner in nonce[1].
 static constexpr unsigned char BPP9000_MODE_START = 1;    // mutate the start state
@@ -65,9 +77,10 @@ struct Miner
     static constexpr unsigned int INVALID_SCORE_VALUE = 0xFFFFFFFFU;   // non-canonical ant nonce
     static constexpr unsigned long long lutSize = 27;   // 3^numberOfNeighbors, base-3 index t0 + 3*t1 + 9*t2
 
-    // Rolling-frame scoring, derived from the frame width so they scale with any config.
-    // advanceThreshold: shift advances when the frame error drops to <= 1/3 of the frame.
-    static constexpr unsigned int advanceThreshold = (unsigned int)(windowWidth / 3);
+    // advanceThreshold: the shift advances while the frame error stays at or below it. On the production
+    // frame it is the node's gate; configs with another frame width keep one third of their frame.
+    static constexpr unsigned int advanceThreshold =
+        (windowWidth == WINDOW_WIDTH) ? ADVANCE_THRESHOLD : (unsigned int)(windowWidth / 3);
     // shiftCap: how far the frame may slide. Production predicts one week ahead, so 24 * 7.
     static constexpr unsigned long long shiftCap = shiftCapParam;
 
@@ -149,6 +162,11 @@ struct Miner
     // Rolling-frame position: score() grades [shift, shift+windowWidth). Holds the committed shift
     // once the walk returns.
     unsigned long long shift = 0;
+    // Last frame a walk may reach: the frames after it have no targets yet. Set by the entry points.
+    unsigned long long shiftLimit = shiftCap;
+    // Rating of the network the walk starts from (the parent; the root for a standalone walk) on the
+    // walk's own frames, before any mutation.
+    Rating parentRating = { Rating::INVALID_ERROR, 0 };
 
     // Score scratch buffers.
     unsigned char neuronOut[maxNumberOfNeurons];
@@ -237,6 +255,21 @@ struct Miner
         return loadTargetSequence(dataBlock);
     }
 
+    // Replaces the first count targets with the given 0/1 values, one byte per target: the task data
+    // a node hands out for an anchor tick.
+    bool loadTaskTargets(const unsigned char* targets, unsigned long long count)
+    {
+        if (count > sequenceLength)
+        {
+            return false;
+        }
+        for (unsigned long long t = 0; t < count; ++t)
+        {
+            outputs[t][0] = targets[t];
+        }
+        return true;
+    }
+
     // Keep only the output column of each row as the target sequence; the input column is skipped.
     bool loadTargetSequence(const unsigned char* dataBlock)
     {
@@ -263,7 +296,8 @@ struct Miner
         return true;
     }
 
-    // nonce[1] layout: bits 0-3 = L in [1, MAX_CHANGES_PER_STEP], bits 4-5 = mode in [1, 3], bits 6-7 = 0.
+    // nonce[1] layout: bits 0-3 = L in [1, MAX_CHANGES_PER_STEP], bits 4-5 = mode, bits 6-7 = 0.
+    // Only the wiring mode is canonical.
     static unsigned int changesPerStep(const unsigned char* nonce)
     {
         return nonce[1] & 0x0F;
@@ -280,8 +314,7 @@ struct Miner
         return (nonce[0] == AlgoType::Bpp9000)
             && (L >= 1)
             && (L <= MAX_CHANGES_PER_STEP)
-            && (mode >= BPP9000_MODE_START)
-            && (mode <= BPP9000_MODE_LUT)
+            && (mode == BPP9000_MODE_WIRING)
             && ((nonce[1] & 0xC0) == 0);
     }
 
@@ -494,7 +527,7 @@ struct Miner
     }
 
     // Scores the frame at the current shift and advances while the network masters it. Stops when it
-    // cannot master a frame, or at shiftCap. Returns the rating reached.
+    // cannot master a frame, or at shiftLimit. Returns the rating reached.
     Rating advanceShift()
     {
         for (;;)
@@ -504,9 +537,9 @@ struct Miner
             {
                 return Rating{ frameError, (unsigned int)shift };   // cannot master this frame
             }
-            if (shift == shiftCap)
+            if (shift >= shiftLimit)
             {
-                return Rating{ frameError, (unsigned int)shift };   // the cap
+                return Rating{ frameError, (unsigned int)shift };   // no targets beyond this frame
             }
             shift++;
         }
@@ -518,6 +551,7 @@ struct Miner
     {
         Rating cur = advanceShift();
         Rating best = cur;
+        parentRating = cur;
         snapshotBest();
 
         for (unsigned long long s = 0; s < numberOfMutations; ++s)
@@ -583,6 +617,7 @@ struct Miner
         applyRootMaterial();
 
         shift = 0;   // standalone has no parent, so the frame starts at the first window
+        shiftLimit = shiftCap;
         return computeScoreFromCurrent(L, 0, mode);
     }
 
@@ -602,14 +637,18 @@ struct Miner
     }
 
     // Ant colony: inherit the parent's network and shift, then walk with the child's own seeds.
+    // limit is the last frame whose targets are loaded: the shift limit the node gives for the anchor tick.
     Rating computeScoreFromParent(const ANN& parentANN, unsigned long long parentShift,
                                         const unsigned char* publicKey,
-                                        const unsigned char* nonce, const unsigned char* anchorTickDigest)
+                                        const unsigned char* nonce, const unsigned char* anchorTickDigest,
+                                        unsigned long long limit = shiftCap)
     {
-        if (!isCanonicalAntNonce(nonce) || parentShift > shiftCap)
+        parentRating = Rating::worst();
+        if (!isCanonicalAntNonce(nonce) || limit > shiftCap || parentShift > limit)
         {
             return Rating::worst();
         }
+        shiftLimit = limit;
 
         expand(parentANN);
         if (!validateTopology())

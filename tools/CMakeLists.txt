@@ -72,7 +72,7 @@ if(WIN32)
     target_link_libraries(ant_tree PRIVATE wsock32 ws2_32)
 endif()
 
-# Dummy ant-solution submitter (random nonces, no scoring)
+# Ant-solution submitter for test networks (random nonces, one walk each, no search)
 add_executable(broadcastAntSolution
     broadcastAntSolution.cpp
     ${CMAKE_SOURCE_DIR}/src/keyUtils.cpp)
