@@ -22,6 +22,7 @@
 #include <vector>
 #include <random>
 
+#include "score_bpp9000.h"
 #include "bpp9000_params.h"
 #include "task_file.h"
 #include "K12AndKeyUtil.h"
