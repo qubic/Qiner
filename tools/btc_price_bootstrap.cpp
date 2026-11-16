@@ -2,17 +2,18 @@
 //
 // Reads "<hour>,<price>" lines (written by fetch_btc_prices.py), keeps the last MIN_POINTS hours and
 // writes them as the node's price image, kind BOOTSTRAP. Prints the two values to copy into
-// core/src/public_settings.h: BTC_FEED_MIN_HOUR and BTC_PRICE_BOOTSTRAP_HASH.
+// core/src/public_settings.h, BTC_FEED_MIN_HOUR and BTC_PRICE_BOOTSTRAP_HASH, and the time of the last hour.
 //
 // Usage:
 //   btc_price_bootstrap <prices.csv> <epoch> [out.bin]
-//   btc_price_bootstrap --check <file.bin>
+//   btc_price_bootstrap --check <file.bin> [period-sec]
 
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -29,6 +30,10 @@ static constexpr unsigned int MAX_FRACTION_DIGITS = 8;
 static constexpr unsigned long long PRICE_SCALE = 100000000ULL;
 // Largest whole part whose price in 1e-8 units still fits in 63 bits.
 static constexpr unsigned long long MAX_WHOLE_PRICE = 92233720367ULL;
+// Hour 0 of the series: 2022-04-13 12:00:00 UTC.
+static constexpr long long HOUR_ZERO_UNIX_SEC = 1649851200LL;
+static constexpr unsigned int DEFAULT_PERIOD_SEC = 3600;
+static constexpr char PERIOD_LINE_PREFIX[] = "# period-sec ";
 
 // Same layout as the node's price image.
 struct PricePoint
@@ -128,7 +133,8 @@ static bool parsePriceE8(const std::string& text, long long& priceE8)
     return true;
 }
 
-static bool readPrices(const char* path, std::vector<HourPrice>& rows)
+// A "# period-sec <n>" line sets periodSec.
+static bool readPrices(const char* path, std::vector<HourPrice>& rows, unsigned int& periodSec)
 {
     std::ifstream in(path);
     if (!in)
@@ -144,6 +150,16 @@ static bool readPrices(const char* path, std::vector<HourPrice>& rows)
         const std::string text = trimmed(line);
         if (text.empty())
         {
+            continue;
+        }
+        if (text[0] == '#')
+        {
+            const size_t prefixLength = sizeof(PERIOD_LINE_PREFIX) - 1;
+            const std::string value = (text.compare(0, prefixLength, PERIOD_LINE_PREFIX) == 0) ? text.substr(prefixLength) : std::string();
+            if (isDigits(value) && value.size() <= 6)
+            {
+                periodSec = (unsigned int)strtoul(value.c_str(), nullptr, 10);
+            }
             continue;
         }
         const size_t comma = text.find(',');
@@ -271,6 +287,20 @@ static bool checkImage(PriceImage& image, unsigned int& firstHour)
     return true;
 }
 
+// Time of the last hour for the given step length.
+static void printLastHourTime(const PriceImage& image, unsigned int periodSec)
+{
+    const time_t seconds = (time_t)(HOUR_ZERO_UNIX_SEC + (long long)image.baseHour * (long long)periodSec);
+    struct tm utc;
+    memset(&utc, 0, sizeof(utc));
+    char text[32] = { 0 };
+    if (gmtime_r(&seconds, &utc) != nullptr && strftime(text, sizeof(text), "%Y-%m-%d %H:%M", &utc) != 0)
+    {
+        printf("last hour %u = %s UTC with a step of %u s (must equal BTC_FEED_PERIOD_SEC of the node)\n",
+            image.baseHour, text, periodSec);
+    }
+}
+
 static void printSettings(const PriceImage& image, unsigned int firstHour)
 {
     unsigned char hash[32];
@@ -329,20 +359,32 @@ static bool writeImage(const char* path, const PriceImage& image)
 
 int main(int argc, char* argv[])
 {
-    if (argc == 3 && strcmp(argv[1], "--check") == 0)
+    if ((argc == 3 || argc == 4) && strcmp(argv[1], "--check") == 0)
     {
+        unsigned int periodSec = DEFAULT_PERIOD_SEC;
+        if (argc == 4)
+        {
+            const std::string periodText = argv[3];
+            if (!isDigits(periodText) || periodText.size() > 6 || strtoul(periodText.c_str(), nullptr, 10) == 0)
+            {
+                printf("The step length must be a number of seconds\n");
+                return 1;
+            }
+            periodSec = (unsigned int)strtoul(periodText.c_str(), nullptr, 10);
+        }
         unsigned int firstHour = 0;
         if (!readImage(argv[2], gImage) || !checkImage(gImage, firstHour))
         {
             return 1;
         }
+        printLastHourTime(gImage, periodSec);
         printSettings(gImage, firstHour);
         return 0;
     }
     if (argc < 3 || argc > 4 || argv[1][0] == '-')
     {
         printf("Usage: btc_price_bootstrap <prices.csv> <epoch> [out.bin]\n");
-        printf("       btc_price_bootstrap --check <file.bin>\n");
+        printf("       btc_price_bootstrap --check <file.bin> [period-sec]\n");
         return 1;
     }
 
@@ -357,7 +399,8 @@ int main(int argc, char* argv[])
 
     std::vector<HourPrice> rows;
     unsigned int firstHour = 0;
-    if (!readPrices(argv[1], rows) || !buildImage(rows, epoch, gImage) || !checkImage(gImage, firstHour))
+    unsigned int periodSec = 0;
+    if (!readPrices(argv[1], rows, periodSec) || !buildImage(rows, epoch, gImage) || !checkImage(gImage, firstHour))
     {
         return 1;
     }
@@ -366,6 +409,12 @@ int main(int argc, char* argv[])
         return 1;
     }
     printf("wrote %s (%zu bytes)\n", outPath, sizeof(gImage));
+    if (periodSec == 0)
+    {
+        printf("%s has no period-sec line; assuming a step of %u s\n", argv[1], DEFAULT_PERIOD_SEC);
+        periodSec = DEFAULT_PERIOD_SEC;
+    }
+    printLastHourTime(gImage, periodSec);
     printSettings(gImage, firstHour);
     return 0;
 }

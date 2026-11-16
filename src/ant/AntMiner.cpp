@@ -1267,7 +1267,18 @@ int main(int argc, char* argv[])
                 RespondAntEpochContext refreshed;
                 if (queryEpochContext(sock, refreshed))
                 {
-                    epochContext = refreshed;
+                    if (refreshed.epoch != epochContext.epoch)
+                    {
+                        printf("Epoch changed from %u to %u - restart the miner.\n", (unsigned int)epochContext.epoch, (unsigned int)refreshed.epoch);
+                        state = 1;
+                        break;
+                    }
+                    // The digests and hashes stay those of the start.
+                    epochContext.threshold = refreshed.threshold;
+                    epochContext.freshnessWindow = refreshed.freshnessWindow;
+                    epochContext.solutionCount = refreshed.solutionCount;
+                    epochContext.freeAnnSlotsCount = refreshed.freeAnnSlotsCount;
+                    epochContext.maxChildrenPerParent = refreshed.maxChildrenPerParent;
                 }
                 printf("| %llu iterations | %llu submitted | %llu stale-skipped | %llu repeat-skipped | max-anchor-age %u/%u | %u/%zu accepted+resolved | tree size %u |\n",
                     gIterations.load(), submitted, staleSkipped, repeatSkipped, maxSubmitAge, epochContext.freshnessWindow, resolved, ownNodes.size(), epochContext.solutionCount);

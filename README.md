@@ -115,7 +115,9 @@ The task data is no longer a pinned task file. It is built from hourly BTC/USDT 
 - **Beat the parent on the same data** - a child of a stored parent must beat that parent rated on the child's task data, not only the parent's recorded rating; otherwise it gets no score and the deposit is kept. A child of the root is exempt.
 - **One solution per identity per tick** - of several solution transactions of one identity in the same tick, the node processes only the one at the highest transaction index; the others are skipped and their deposit is returned. A node publishes one queued solution per computor per tick, so `AntMiner` needs no extra gate.
 
-`AntMiner` implements the first three (mining loop, steps 5b and 6). Full rules and wire layouts: core `doc/ant_colony_mining.md`, sections 2.3a and 2.7(d). The Standalone `Qiner` sections below still describe the task file and are not updated for the live task data.
+`AntMiner` implements the first three (mining loop, steps 5b and 6). It mines for the epoch it was started in and stops when the node reports another epoch; start it again for the new epoch. Full rules and wire layouts: core `doc/ant_colony_mining.md`, sections 2.3a and 2.7(d). The Standalone `Qiner` sections below describe the standalone program and its task file; the node takes its task data from the price series and counts bpp9000 solutions only through the ant colony.
+
+**Bootstrap file of the first live epoch** (for whoever builds the release): `python3 tools/fetch_btc_prices.py --out btc_prices.csv` writes the last 8929 hourly prices, and `btc_price_bootstrap btc_prices.csv <epoch>` turns them into `btc_price_bootstrap.bin` and prints `BTC_FEED_MIN_HOUR` and `BTC_PRICE_BOOTSTRAP_HASH` for core `src/public_settings.h`. Both print the time range of the prices; `--period-sec` must equal the node's `BTC_FEED_PERIOD_SEC` (3600 on mainnet).
 
 ## Where the tree lives
 
@@ -238,9 +240,12 @@ numberOfWindows = T - W        // data room the frame may slide within
 maxTicks = MAX_NUMBER_OF_TICKS // rollout tick budget; exceeding it fails the network
 S = NUMBER_OF_MUTATIONS        // search steps
 
-advanceThreshold = W / 3       // frame error at or below this advances shift by 1
+advanceThreshold = ADVANCE_THRESHOLD  // frame error at or below this advances shift by 1; must equal the node's
+                                      // BPP9000_ADVANCE_THRESHOLD (default in score_bpp9000.h, build option
+                                      // QINER_BPP9000_ADVANCE_THRESHOLD)
 shiftCap         = 24 * 7      // highest frame the miner may reach; production predicts one week ahead
-SOLUTION_THRESHOLD = W * 45 / 100   // frame-0 floor, applies only at shift 0
+SOLUTION_THRESHOLD                 // frame-0 floor, applies only at shift 0; the node sends the epoch's value in
+                                   // its epoch context
 ```
 
 ## Rating

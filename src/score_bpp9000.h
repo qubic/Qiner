@@ -22,7 +22,7 @@ static constexpr unsigned long long NUMBER_OF_OUTPUT_NEURONS = 1;
 #define QINER_BPP9000_POPULATION 1024
 #endif
 #ifndef QINER_BPP9000_ADVANCE_THRESHOLD
-#define QINER_BPP9000_ADVANCE_THRESHOLD 3942
+#define QINER_BPP9000_ADVANCE_THRESHOLD 3504
 #endif
 static constexpr unsigned long long POPULATION_THRESHOLD = QINER_BPP9000_POPULATION;
 static constexpr unsigned long long NUMBER_OF_NEIGHBORS = 3;

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Fetch the BTC/USDT prices of the node's bootstrap price series and write them as '<hour>,<price>' lines.
+The first line of the file, '# period-sec <n>', carries the step length to the next tool.
 
 The price of hour H is the last Binance BTCUSDT trade before H, which is the close of the 1h kline that
 opens one hour earlier. Hour 0 starts at 2022-04-13 12:00 UTC, so epoch e starts at hour 168 * e.
@@ -25,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from datetime import datetime, timezone
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -40,6 +42,11 @@ MASK64: int = (1 << 64) - 1
 class HourPrice:
     hour: int
     price: str
+
+
+def hour_utc(hour: int, hour_ms: int) -> str:
+    moment = datetime.fromtimestamp((HOUR_ZERO_MS + hour * hour_ms) / 1000, tz=timezone.utc)
+    return moment.strftime("%Y-%m-%d %H:%M UTC")
 
 
 def checked_price(text: str) -> str:
@@ -126,8 +133,10 @@ def main() -> None:
     if [row.hour for row in rows] != list(range(first_hour, next_hour)):
         raise SystemExit(f"got {len(rows)} prices, expected the {MIN_POINTS} hours {first_hour} .. {next_hour - 1}")
 
-    args.out.write_text("".join(f"{row.hour},{row.price}\n" for row in rows))
+    args.out.write_text(f"# period-sec {args.period_sec}\n" + "".join(f"{row.hour},{row.price}\n" for row in rows))
     print(f"wrote {args.out}: hours {first_hour} .. {next_hour - 1} ({len(rows)} prices)")
+    print(f"one step is {args.period_sec} s: {hour_utc(first_hour, hour_ms)} .. {hour_utc(next_hour - 1, hour_ms)}")
+    print("the step must equal BTC_FEED_PERIOD_SEC of the node; a wrong step shows as a wrong time range here")
 
 
 if __name__ == "__main__":

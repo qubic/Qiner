@@ -609,6 +609,13 @@ int main(int argc, char* argv[])
             c--;
             continue;
         }
+        if (haveCtxBefore && tickInfo.epoch != ctxBefore.epoch)
+        {
+            // The pool and the root belong to the epoch of the start.
+            printf("[%d/%d] epoch changed from %u to %u - stopping.\n", c + 1, count, (unsigned int)ctxBefore.epoch,
+                (unsigned int)tickInfo.epoch);
+            break;
+        }
 
         // The latest completed tick the node holds data for.
         unsigned int anchorTick = 0;
