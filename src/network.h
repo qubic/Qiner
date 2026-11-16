@@ -131,6 +131,7 @@ struct ServerSocket
     }
 
     SOCKET serverSocket;
+    static constexpr int sendFlags = 0;
 #else
     void closeConnection()
     {
@@ -169,6 +170,8 @@ struct ServerSocket
     }
 
     int serverSocket;
+    // A send on a closed connection returns an error instead of raising SIGPIPE.
+    static constexpr int sendFlags = MSG_NOSIGNAL;
 #endif
 
     bool sendData(char* buffer, unsigned int size)
@@ -176,7 +179,7 @@ struct ServerSocket
         while (size)
         {
             int numberOfBytes;
-            if ((numberOfBytes = send(serverSocket, buffer, size, 0)) <= 0)
+            if ((numberOfBytes = send(serverSocket, buffer, size, sendFlags)) <= 0)
             {
                 return false;
             }
