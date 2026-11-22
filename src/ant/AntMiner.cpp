@@ -181,6 +181,117 @@ static int queryTaskData(ServerSocket& sock, unsigned int anchorTick, RespondBpp
     return 1;
 }
 
+static bool queryPredictionPhase(ServerSocket& sock, RespondPredictionPhase& out)
+{
+    if (!sendRequest(sock, REQUEST_PREDICTION_PHASE, NULL, 0))
+    {
+        return false;
+    }
+    return waitForResponse(sock, RESPOND_PREDICTION_PHASE, (char*)&out, sizeof(out)) == (int)sizeof(out);
+}
+
+static bool queryPredictionIdentity(ServerSocket& sock, const unsigned char* publicKey, RespondPredictionIdentity& out)
+{
+    RequestPredictionIdentity request;
+    memcpy(request.publicKey, publicKey, 32);
+    if (!sendRequest(sock, REQUEST_PREDICTION_IDENTITY, &request, sizeof(request)))
+    {
+        return false;
+    }
+    return waitForResponse(sock, RESPOND_PREDICTION_IDENTITY, (char*)&out, sizeof(out)) == (int)sizeof(out);
+}
+
+// One status line: the prediction ranking of the epoch and of this identity.
+// ------------------------------------------------------------------------------------------------
+// Prediction strategy (reference)
+//
+// What the node does: once the epoch has switched and an identity has qualified, the identity's LAST
+// ACCEPTED solution is its predicting network, also when it is weaker than an earlier one. Every hour
+// the answer of that network is compared with the price move, and the identity is ranked by its
+// accuracy (correct hours / counted hours).
+//
+// What this miner does: the best network predicts.
+//   1. It knows the answers of a solution before sending it (collectOutputs() on the hit's network).
+//   2. While its identity predicts, it extends only its best node: no exploration (mayExplore()).
+//   3. While its identity predicts, it sends a hit only if it beats its best network (shouldSend()),
+//      so the predicting network never gets weaker.
+// It does not choose its answers. A miner with another strategy changes mayExplore() and shouldSend().
+// ------------------------------------------------------------------------------------------------
+
+// True if this round may extend a random node or the root instead of the best node.
+static bool mayExplore(bool predicting, unsigned long long roll)
+{
+    if (predicting)
+    {
+        return false;
+    }
+    return (roll % ANT_EXPLORE_ONE_IN) == 0;
+}
+
+// True if a hit is sent to the node. bestOwn: the best network this identity has so far.
+static bool shouldSend(bool predicting, const score_bpp9000::Rating& hit, const score_bpp9000::Rating& bestOwn)
+{
+    if (!predicting)
+    {
+        return true;
+    }
+    return hit.isBetterThan(bestOwn);
+}
+
+static const char* const PREDICTION_ANSWER_NAMES[3] = { "down", "up", "none" };
+
+// The answers the node holds for an identity against the ones computed here from the answering network.
+// answers[k] is for hour baseHour + 1 + k. A solution replaces only the hours that were open when it was
+// executed; the hours before keep what they had, so only the tail from the last difference on is its own.
+// storedHours: hours after the base hour the node has a price for.
+static void printAnswerCheck(unsigned int solutionTick, unsigned int solutionIndexInTick, const unsigned char* computed,
+    const unsigned char* held, unsigned int baseHour, unsigned int storedHours)
+{
+    unsigned int equalFrom = storedHours;
+    for (unsigned int k = storedHours; k < PREDICTION_IDENTITY_ANSWERS; k++)
+    {
+        if (computed[k] != held[k])
+        {
+            equalFrom = k + 1U;
+        }
+    }
+    const unsigned int equalHours = PREDICTION_IDENTITY_ANSWERS - equalFrom;
+    const unsigned int closedHours = equalFrom - storedHours;
+    // More than a day of closed hours past the last price would mean the price series is a day behind.
+    const bool plausible = (equalHours != 0 && closedHours <= 24U);
+    printf("| answers of solution %u/%u computed here: equal to the node's for the %u hours from hour %u on, %u earlier hours were closed%s |\n",
+        solutionTick, solutionIndexInTick, equalHours, baseHour + 1U + equalFrom, closedHours, plausible ? "" : " - MISMATCH");
+}
+
+// nextAnswerIndex: where the next hour the node stores sits in the identity's answers.
+static void printPredictionStatus(const RespondPredictionPhase& phase, const RespondPredictionIdentity& identity, unsigned int nextAnswerIndex)
+{
+    if (phase.switchTick == 0)
+    {
+        printf("| prediction: training, %u computors qualified (threshold %u, deadline %u s) |",
+            phase.computorsQualified, phase.threshold, phase.deadlineSeconds);
+    }
+    else
+    {
+        printf("| prediction: ranking since tick %u, first counted hour %u, state digest %08x |",
+            phase.switchTick, phase.switchFirstHour, phase.foldedDigest);
+    }
+    if (identity.firstHour == 0)
+    {
+        printf(" this ID: not qualified |\n");
+        return;
+    }
+    unsigned int nextAnswer = 2;
+    if (nextAnswerIndex < PREDICTION_IDENTITY_ANSWERS && identity.answers[nextAnswerIndex] < 2)
+    {
+        nextAnswer = identity.answers[nextAnswerIndex];
+    }
+    const double accuracy = identity.hours ? (100.0 * identity.correct / identity.hours) : 0.0;
+    printf(" this ID: %u correct of %u counted hours (%.1f%%, from hour %u), answering solution %u/%u, next hour: %s |\n",
+        identity.correct, identity.hours, accuracy, identity.firstHour, identity.solutionTick, identity.solutionIndexInTick,
+        PREDICTION_ANSWER_NAMES[nextAnswer]);
+}
+
 // Derive the anchor digest for anchorTick as the node does: fetch the tick's stored TickData
 // (REQUEST_TICK_DATA) and hash K12(anchorTick || K12(TickData))
 // Returns 1 with anchorDigest filled, 0 when the node holds no TickData, -1 on network failure.
@@ -585,6 +696,8 @@ struct MineResult
     unsigned int parentShift;
     unsigned int parentDepth;
     AntMinerT::ANN ann;
+    // The network's answer for each hour after the epoch's base hour: 0 = down, 1 = up, 2 = none.
+    unsigned char answers[PREDICTION_IDENTITY_ANSWERS];
 };
 static std::vector<MineResult> gResults;
 static std::mutex gResultsMutex;
@@ -652,6 +765,8 @@ static void mineWorker(const unsigned char* pool, const unsigned char* computorP
             result.parentShift = job.parentShift;
             result.parentDepth = job.parentDepth;
             miner->getBestANN(result.ann);
+            // What this network answers is fixed now: the emits after the first frame, one per hour.
+            miner->collectOutputs(result.ann, score_bpp9000::WINDOW_WIDTH, PREDICTION_IDENTITY_ANSWERS, result.answers);
             std::lock_guard<std::mutex> guard(gResultsMutex);
             gResults.push_back(result);
         }
@@ -756,6 +871,22 @@ int main(int argc, char* argv[])
     printf("Ant epoch context: threshold %u, freshness window %u ticks, %u solutions so far\n",
         epochContext.threshold, epochContext.freshnessWindow, epochContext.solutionCount);
 
+    // Prediction ranking status, read with every resolve cycle. Off for a node that does not answer the requests.
+    bool predictionStatus = true;
+    {
+        RespondPredictionPhase phase;
+        RespondPredictionIdentity identity;
+        if (queryPredictionPhase(sock, phase) && queryPredictionIdentity(sock, computorPublicKey, identity))
+        {
+            printPredictionStatus(phase, identity, PREDICTION_IDENTITY_ANSWERS);
+        }
+        else
+        {
+            predictionStatus = false;
+            printf("The node does not answer the prediction requests - no prediction status.\n");
+        }
+    }
+
     // Full pipeline start
     std::vector<unsigned char> sharedPool;
     std::unique_ptr<AntMinerT> miner;
@@ -799,6 +930,9 @@ int main(int argc, char* argv[])
     unsigned long long submitted = 0;
     unsigned long long staleSkipped = 0;   // hits dropped because the anchor left the freshness window before submit
     unsigned long long repeatSkipped = 0;  // hits that repeat a child already sent (same parent, rating and network)
+    unsigned long long weakSkipped = 0;    // hits not sent while this ID predicts: not better than its best network
+    // The epoch has switched and this ID has qualified: its last accepted solution is its predicting network.
+    bool predicting = false;
     unsigned int maxSubmitAge = 0;          // worst anchor age (ticks) among submitted solutions, vs freshnessWindow
     auto lastResolveTime = std::chrono::steady_clock::now();
     auto lastLutCheckTime = std::chrono::steady_clock::now();
@@ -910,7 +1044,7 @@ int main(int argc, char* argv[])
         // root instead of the best, so we do not get stuck descending a single basin.
         unsigned long long exploreRoll = 0;
         _rdrand64_step(&exploreRoll);
-        if ((exploreRoll % ANT_EXPLORE_ONE_IN) == 0)
+        if (mayExplore(predicting, exploreRoll))
         {
             parentNode = NULL;   // root: a fresh basin
             if (!ownNodes.empty())
@@ -1060,10 +1194,25 @@ int main(int argc, char* argv[])
                 std::lock_guard<std::mutex> guard(gResultsMutex);
                 results.swap(gResults);
             }
+            // The best network of this identity so far, listed by the node or not yet.
+            score_bpp9000::Rating bestOwnRating = score_bpp9000::Rating::worst();
+            for (const OwnNode& node : ownNodes)
+            {
+                const score_bpp9000::Rating nodeRating{ node.score, node.shift };
+                if (!node.lutMismatch && nodeRating.isBetterThan(bestOwnRating))
+                {
+                    bestOwnRating = nodeRating;
+                }
+            }
             bool submitFailed = false;
             for (size_t i = 0; i < results.size(); i++)
             {
                 const MineResult& r = results[i];
+                if (!shouldSend(predicting, score_bpp9000::Rating{ r.score, r.shift }, bestOwnRating))
+                {
+                    weakSkipped++;
+                    continue;
+                }
                 // On-time gate: if the anchor already left the freshness window, the node rejects it as
                 // stale and forfeits the deposit. Drop it and count the miss instead of submitting late.
                 if (tickInfo.tick > r.anchorTick + epochContext.freshnessWindow)
@@ -1124,6 +1273,21 @@ int main(int argc, char* argv[])
                 ownNodes.push_back(node);
                 printf("Submitted: depth %u, score %u (parent score %u), anchor %u\n",
                     node.depth, r.score, r.parentScore, r.anchorTick);
+                if (score_bpp9000::Rating{ r.score, r.shift }.isBetterThan(bestOwnRating))
+                {
+                    bestOwnRating = score_bpp9000::Rating{ r.score, r.shift };
+                }
+                if (haveTaskData)
+                {
+                    // The next hours the node has no price for yet; answers[k] is for hour baseHour + 1 + k.
+                    printf("  its answers if accepted:");
+                    for (unsigned int k = cachedTaskData.shiftLimit; k < cachedTaskData.shiftLimit + 3U && k < PREDICTION_IDENTITY_ANSWERS; k++)
+                    {
+                        const unsigned char answer = r.answers[k];
+                        printf(" hour %u %s", cachedTaskData.baseHour + 1U + k, PREDICTION_ANSWER_NAMES[answer < 2 ? answer : 2]);
+                    }
+                    printf("\n");
+                }
             }
             if (submitFailed)
             {
@@ -1280,8 +1444,41 @@ int main(int argc, char* argv[])
                     epochContext.freeAnnSlotsCount = refreshed.freeAnnSlotsCount;
                     epochContext.maxChildrenPerParent = refreshed.maxChildrenPerParent;
                 }
-                printf("| %llu iterations | %llu submitted | %llu stale-skipped | %llu repeat-skipped | max-anchor-age %u/%u | %u/%zu accepted+resolved | tree size %u |\n",
-                    gIterations.load(), submitted, staleSkipped, repeatSkipped, maxSubmitAge, epochContext.freshnessWindow, resolved, ownNodes.size(), epochContext.solutionCount);
+                printf("| %llu iterations | %llu submitted | %llu stale-skipped | %llu repeat-skipped | %llu weak-skipped | max-anchor-age %u/%u | %u/%zu accepted+resolved | tree size %u |\n",
+                    gIterations.load(), submitted, staleSkipped, repeatSkipped, weakSkipped, maxSubmitAge, epochContext.freshnessWindow, resolved, ownNodes.size(), epochContext.solutionCount);
+                if (predictionStatus)
+                {
+                    RespondPredictionPhase phase;
+                    RespondPredictionIdentity identity;
+                    if (queryPredictionPhase(sock, phase) && queryPredictionIdentity(sock, computorPublicKey, identity))
+                    {
+                        // The task data holds shiftLimit hours after the base hour, so the next hour is answers[shiftLimit].
+                        printPredictionStatus(phase, identity, haveTaskData ? cachedTaskData.shiftLimit : PREDICTION_IDENTITY_ANSWERS);
+
+                        const bool predictingNow = (phase.switchTick != 0 && identity.firstHour != 0);
+                        if (predictingNow && !predicting)
+                        {
+                            printf("This ID predicts now: only a solution that beats its best network is sent, and no exploration from other nodes.\n");
+                        }
+                        predicting = predictingNow;
+
+                        if (identity.firstHour != 0 && haveTaskData)
+                        {
+                            for (const OwnNode& node : ownNodes)
+                            {
+                                if (node.refKnown && !node.lutMismatch
+                                    && node.selfTick == identity.solutionTick && node.selfSolutionIndexInTick == identity.solutionIndexInTick)
+                                {
+                                    unsigned char computed[PREDICTION_IDENTITY_ANSWERS];
+                                    miner->collectOutputs(node.ann, score_bpp9000::WINDOW_WIDTH, PREDICTION_IDENTITY_ANSWERS, computed);
+                                    printAnswerCheck(node.selfTick, node.selfSolutionIndexInTick, computed, identity.answers,
+                                        identity.baseHour, cachedTaskData.shiftLimit);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
             }
             else
             {

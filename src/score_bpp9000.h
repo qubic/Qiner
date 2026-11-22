@@ -367,6 +367,47 @@ struct Miner
         return failures;
     }
 
+    // Output trit of emits [first, first + count) of a network, run from its start state.
+    // An emit the network does not reach within maxNumberOfTicks stays TRIT_UNKNOWN.
+    // Loads the network into the engine: call it between walks, not inside one.
+    void collectOutputs(const ANN& ann, unsigned long long first, unsigned long long count, unsigned char* collected)
+    {
+        memset(collected, TRIT_UNKNOWN, count);
+        expand(ann);
+        for (unsigned long long n = 0; n < populationThreshold; ++n)
+        {
+            neuronOut[n] = curInitial[n];
+        }
+
+        unsigned long long counter = 0;
+        unsigned long long ticks = 0;
+        while (counter < first + count)
+        {
+            if (++ticks >= maxNumberOfTicks)
+            {
+                return;
+            }
+
+            memcpy(neuronPrev, neuronOut, sizeof(neuronPrev));
+            for (unsigned long long n = 0; n < populationThreshold; ++n)
+            {
+                const unsigned long long t0 = neuronPrev[neighborIndices[n * numberOfNeighbors + 0]];
+                const unsigned long long t1 = neuronPrev[neighborIndices[n * numberOfNeighbors + 1]];
+                const unsigned long long t2 = neuronPrev[neighborIndices[n * numberOfNeighbors + 2]];
+                neuronOut[n] = curLut[n * lutSize + (t0 + 3 * t1 + 9 * t2)];
+            }
+
+            if (neuronOut[controlIndex] != TRIT_UNKNOWN)
+            {
+                if (counter >= first)
+                {
+                    collected[counter - first] = neuronOut[outputIndex];
+                }
+                counter++;
+            }
+        }
+    }
+
     // Mutations, one seed per change.
     void mutateStartState(unsigned long long mutationSeedValue)
     {

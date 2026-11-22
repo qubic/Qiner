@@ -119,6 +119,56 @@ The task data is no longer a pinned task file. It is built from hourly BTC/USDT 
 
 **Bootstrap file of the first live epoch** (for whoever builds the release): `python3 tools/fetch_btc_prices.py --out btc_prices.csv` writes the last 8929 hourly prices, and `btc_price_bootstrap btc_prices.csv <epoch>` turns them into `btc_price_bootstrap.bin` and prints `BTC_FEED_MIN_HOUR` and `BTC_PRICE_BOOTSTRAP_HASH` for core `src/public_settings.h`. Both print the time range of the prices; `--period-sec` must equal the node's `BTC_FEED_PERIOD_SEC` (3600 on mainnet).
 
+## Prediction phase
+
+During an epoch the ranking can switch from training to prediction. An identity **qualifies** with an accepted solution at shift >= 1, or at shift 0 with at most `threshold` errors. Once enough computors have qualified, the epoch switches. From then on the network of a qualified identity answers every coming hour with "up" or "down", the node counts the hours it got right, and with enough counted hours the identity is ranked by its accuracy (correct hours / counted hours). The rules are in core `doc/ant_colony_mining.md`, section 2.4a. What matters for a miner:
+
+- **Answers** - a network's answer for hour `baseHour + 1 + k` is its output at emit `8760 + k`: `0` = down, `1` = up, `2` = none. A network has no inputs, so its answers are fixed when it is created. `collectOutputs()` in `src/score_bpp9000.h` computes them.
+- **Which network answers** - before the switch the identity's best network, after the switch its last accepted solution, also a weaker one.
+- **Deadline** - a solution answers an hour only if it is executed at least `deadlineSeconds` before that hour; a later one answers from the next hour on.
+- **Counting** - an hour is counted when its price is stored. An hour without a price is counted for nobody.
+
+Two requests, neither signed (layouts in `src/ant/ant_colony_message.h`):
+
+| Request | Types | Reply |
+|---|---|---|
+| `REQUEST_PREDICTION_PHASE`, no payload | 82 / 83 | `switchTick` (0 = training), `switchFirstHour`, `computorsQualified`, `threshold`, `deadlineSeconds`, `foldedDigest` (24 bytes) |
+| `REQUEST_PREDICTION_IDENTITY`, a 32-byte public key | 84 / 85 | `firstHour` (0 = not qualified), `hours`, `correct`, `solutionTick`, `solutionIndexInTick`, `baseHour`, `answers[168]` (192 bytes) |
+
+`foldedDigest` is a digest of the node's prediction state. Two nodes in sync report the same value; it is 0 in training.
+
+**What `AntMiner` does**
+
+- It computes the answers of every solution before sending it and prints the next three:
+  ```
+  Submitted: depth 4, score 4391 (parent score 4402), anchor 91688351
+    its answers if accepted: hour 2423871 up hour 2423872 down hour 2423873 up
+  ```
+- It reads both requests with every resolve cycle and prints the phase and the state of its identity:
+  ```
+  | prediction: training, 131 computors qualified (threshold 3504, deadline 3000 s) | this ID: not qualified |
+  | prediction: ranking since tick 91688106, first counted hour 494123, state digest 5f1c22a0 | this ID: 7 correct of 12 counted hours (58.3%, from hour 494123), answering solution 91688342/17, next hour: up |
+  ```
+- It checks the answers the node holds for its identity against the ones it computes from the same network. A solution replaces only the hours that were still open when it was executed, so the check counts the hours from the last difference on:
+  ```
+  | answers of solution 91688342/17 computed here: equal to the node's for the 152 hours from hour 494140 on, 2 earlier hours were closed |
+  ```
+  The line ends in `MISMATCH` when no hour is equal or more than 24 earlier hours differ.
+A node without the two requests gives no reply: `AntMiner` waits 20 seconds once at start, prints `no prediction status`, and mines as before.
+
+**Reference prediction strategy: the best network predicts**
+
+The node takes the *last accepted* solution of an identity as its predicting network, also when that solution is weaker than an earlier one. `AntMiner` therefore changes two things once the epoch has switched and its identity has qualified:
+
+| | In training | While the identity predicts |
+|---|---|---|
+| Parent of the next walk | the best own node; 1 round in 8 a random own node or the root | the best own node only |
+| Which hits are sent | every hit | only a hit that beats the best network; the others are counted as `weak-skipped` |
+
+So the predicting network is always the identity's best one, and every new predictor is a direct improvement of the one before. `AntMiner` does not choose its answers by any other information: the network that scores best on the known prices predicts.
+
+In the code this is one block at `Prediction strategy (reference)` in `src/ant/AntMiner.cpp` with two functions: `mayExplore()` decides the parent, `shouldSend()` decides which hits go out. A miner with another strategy changes these two; the answers of a hit are in `MineResult::answers` before it is sent.
+
 ## Where the tree lives
 
 The authoritative tree lives on the **node** - it is the consensus store (a per-identity forest), and every accepted solution becomes a node in it. The node also recomputes every claimed score deterministically and gates acceptance, so the miner's real job is to reproduce the node's score bit-exactly and submit on time. Everything the miner keeps locally is advisory; consensus lives on the node.

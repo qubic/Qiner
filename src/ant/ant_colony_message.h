@@ -20,6 +20,10 @@
 #define RESPOND_ANT_EPOCH_CONTEXT 77
 #define REQUEST_BPP9000_TASK_DATA 80
 #define RESPOND_BPP9000_TASK_DATA 81
+#define REQUEST_PREDICTION_PHASE 82
+#define RESPOND_PREDICTION_PHASE 83
+#define REQUEST_PREDICTION_IDENTITY 84
+#define RESPOND_PREDICTION_IDENTITY 85
 
 // ROOT sentinel of a parent reference (matches core SolutionRef ROOT_REF).
 static constexpr unsigned int ROOT_TICK = 0U;
@@ -164,6 +168,41 @@ struct RespondBpp9000TaskData
 static constexpr unsigned int RESPOND_BPP9000_TASK_DATA_HEADER_SIZE = 20;
 static_assert(sizeof(RespondBpp9000TaskData) == RESPOND_BPP9000_TASK_DATA_HEADER_SIZE + BPP9000_TASK_DATA_MAX_TARGETS,
     "RespondBpp9000TaskData unexpected size");
+
+// Prediction ranking (core/src/network_messages/prediction_phase.h). Neither request is signed.
+// Phase of the epoch; the request has no payload.
+struct RespondPredictionPhase
+{
+    unsigned int switchTick;            // 0: training. Else the tick the epoch switched to the prediction ranking in
+    unsigned int switchFirstHour;       // first hour that counts, 0 in training
+    unsigned int computorsQualified;
+    unsigned int threshold;             // an identity qualifies at shift >= 1, or at shift 0 with at most this many errors
+    unsigned int deadlineSeconds;       // a solution answers an hour if it is executed at least this long before the hour
+    unsigned int foldedDigest;          // digest of the node's prediction state at its last fold into the mining digest
+};
+static_assert(sizeof(RespondPredictionPhase) == 24, "RespondPredictionPhase unexpected size");
+
+// Prediction state of one identity.
+struct RequestPredictionIdentity
+{
+    unsigned char publicKey[32];
+};
+static_assert(sizeof(RequestPredictionIdentity) == 32, "RequestPredictionIdentity unexpected size");
+
+static constexpr unsigned int PREDICTION_IDENTITY_ANSWERS = 24 * 7;
+
+struct RespondPredictionIdentity
+{
+    unsigned int firstHour;             // 0: the identity has not qualified. Else the first hour counted for it
+    unsigned int hours;                 // counted hours
+    unsigned int correct;               // correct hours
+    unsigned int solutionTick;          // the solution whose network answers now
+    unsigned int solutionIndexInTick;
+    unsigned int baseHour;
+    // answers[k] is for hour baseHour + 1 + k: 0 = down, 1 = up, 2 = none
+    unsigned char answers[PREDICTION_IDENTITY_ANSWERS];
+};
+static_assert(sizeof(RespondPredictionIdentity) == 192, "RespondPredictionIdentity unexpected size");
 
 // The payload following a BroadcastMessage(MESSAGE_TYPE_ANT_SOLUTION) header.
 struct AntSolutionBroadcastPayload
