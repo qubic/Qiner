@@ -25,6 +25,17 @@ target_link_libraries(bpp9000_task_from_candles
     PRIVATE
     ${TOOLS_LINK_LIBS})
 
+# Build the bootstrap price series of the live BTC feed from the prices of fetch_btc_prices.py
+add_executable(btc_price_bootstrap btc_price_bootstrap.cpp)
+
+target_include_directories(btc_price_bootstrap
+    PRIVATE
+    ${CMAKE_SOURCE_DIR}/src)
+
+target_link_libraries(btc_price_bootstrap
+    PRIVATE
+    ${TOOLS_LINK_LIBS})
+
 # Ground-truth / ant chain golden generator (--ant / --depth N / --skip-timeouts)
 add_executable(bpp9000_ground_truth bpp9000_ground_truth.cpp)
 
@@ -72,7 +83,7 @@ if(WIN32)
     target_link_libraries(ant_tree PRIVATE wsock32 ws2_32)
 endif()
 
-# Dummy ant-solution submitter (random nonces, no scoring)
+# Ant-solution submitter for test networks (random nonces, one walk each, no search)
 add_executable(broadcastAntSolution
     broadcastAntSolution.cpp
     ${CMAKE_SOURCE_DIR}/src/keyUtils.cpp)

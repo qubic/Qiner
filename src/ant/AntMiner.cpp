@@ -82,7 +82,10 @@ static int nodePort = 0;
 static int waitForResponse(ServerSocket& sock, unsigned char wantedType, char* payload, unsigned int payloadCapacity)
 {
     static char scratch[1024 * 1024];
-    for (int attempt = 0; attempt < 64; attempt++)
+    // The reply can sit behind many tick and vote broadcasts: bound the skip by time, not by count.
+    const std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (std::chrono::steady_clock::now() < deadline)
     {
         RequestResponseHeader header;
         if (!sock.receiveData((char*)&header, sizeof(header)))
@@ -151,6 +154,144 @@ static bool queryEpochContext(ServerSocket& sock, RespondAntEpochContext& out)
     return waitForResponse(sock, RESPOND_ANT_EPOCH_CONTEXT, (char*)&out, sizeof(out)) == (int)sizeof(out);
 }
 
+// The task data a solution anchored at anchorTick is graded on: the node's shift limit for that tick
+// and the targets up to it. The answer for a given anchor tick never changes.
+// Returns 1 with out filled (out.valid may still be 0), -1 on network failure.
+static int queryTaskData(ServerSocket& sock, unsigned int anchorTick, RespondBpp9000TaskData& out)
+{
+    RequestBpp9000TaskData request;
+    request.anchorTick = anchorTick;
+    if (!sendRequest(sock, REQUEST_BPP9000_TASK_DATA, &request, sizeof(request)))
+    {
+        return -1;
+    }
+    memset(&out, 0, sizeof(out));
+    const int received = waitForResponse(sock, RESPOND_BPP9000_TASK_DATA, (char*)&out, sizeof(out));
+    if (received < (int)RESPOND_BPP9000_TASK_DATA_HEADER_SIZE)
+    {
+        return -1;
+    }
+    if (out.valid
+        && (out.anchorTick != anchorTick
+            || out.shiftLimit > score_bpp9000::SHIFT_CAP
+            || (unsigned int)received != RESPOND_BPP9000_TASK_DATA_HEADER_SIZE + (unsigned int)score_bpp9000::WINDOW_WIDTH + out.shiftLimit))
+    {
+        out.valid = 0;
+    }
+    return 1;
+}
+
+static bool queryPredictionPhase(ServerSocket& sock, RespondPredictionPhase& out)
+{
+    if (!sendRequest(sock, REQUEST_PREDICTION_PHASE, NULL, 0))
+    {
+        return false;
+    }
+    return waitForResponse(sock, RESPOND_PREDICTION_PHASE, (char*)&out, sizeof(out)) == (int)sizeof(out);
+}
+
+static bool queryPredictionIdentity(ServerSocket& sock, const unsigned char* publicKey, RespondPredictionIdentity& out)
+{
+    RequestPredictionIdentity request;
+    memcpy(request.publicKey, publicKey, 32);
+    if (!sendRequest(sock, REQUEST_PREDICTION_IDENTITY, &request, sizeof(request)))
+    {
+        return false;
+    }
+    return waitForResponse(sock, RESPOND_PREDICTION_IDENTITY, (char*)&out, sizeof(out)) == (int)sizeof(out);
+}
+
+// One status line: the prediction ranking of the epoch and of this identity.
+// ------------------------------------------------------------------------------------------------
+// Prediction strategy (reference)
+//
+// What the node does: once the epoch has switched and an identity has qualified, the identity's LAST
+// ACCEPTED solution is its predicting network, also when it is weaker than an earlier one. Every hour
+// the answer of that network is compared with the price move, and the identity is ranked by its
+// accuracy (correct hours / counted hours).
+//
+// What this miner does: the best network predicts.
+//   1. It knows the answers of a solution before sending it (collectOutputs() on the hit's network).
+//   2. While its identity predicts, it extends only its best node: no exploration (mayExplore()).
+//   3. While its identity predicts, it sends a hit only if it beats its best network (shouldSend()),
+//      so the predicting network never gets weaker.
+// It does not choose its answers. A miner with another strategy changes mayExplore() and shouldSend().
+// ------------------------------------------------------------------------------------------------
+
+// True if this round may extend a random node or the root instead of the best node.
+static bool mayExplore(bool predicting, unsigned long long roll)
+{
+    if (predicting)
+    {
+        return false;
+    }
+    return (roll % ANT_EXPLORE_ONE_IN) == 0;
+}
+
+// True if a hit is sent to the node. bestOwn: the best network this identity has so far.
+static bool shouldSend(bool predicting, const score_bpp9000::Rating& hit, const score_bpp9000::Rating& bestOwn)
+{
+    if (!predicting)
+    {
+        return true;
+    }
+    return hit.isBetterThan(bestOwn);
+}
+
+static const char* const PREDICTION_ANSWER_NAMES[3] = { "down", "up", "none" };
+
+// The answers the node holds for an identity against the ones computed here from the answering network.
+// answers[k] is for hour baseHour + 1 + k. A solution replaces only the hours that were open when it was
+// executed; the hours before keep what they had, so only the tail from the last difference on is its own.
+// storedHours: hours after the base hour the node has a price for.
+static void printAnswerCheck(unsigned int solutionTick, unsigned int solutionIndexInTick, const unsigned char* computed,
+    const unsigned char* held, unsigned int baseHour, unsigned int storedHours)
+{
+    unsigned int equalFrom = storedHours;
+    for (unsigned int k = storedHours; k < PREDICTION_IDENTITY_ANSWERS; k++)
+    {
+        if (computed[k] != held[k])
+        {
+            equalFrom = k + 1U;
+        }
+    }
+    const unsigned int equalHours = PREDICTION_IDENTITY_ANSWERS - equalFrom;
+    const unsigned int closedHours = equalFrom - storedHours;
+    // More than a day of closed hours past the last price would mean the price series is a day behind.
+    const bool plausible = (equalHours != 0 && closedHours <= 24U);
+    printf("| answers of solution %u/%u computed here: equal to the node's for the %u hours from hour %u on, %u earlier hours were closed%s |\n",
+        solutionTick, solutionIndexInTick, equalHours, baseHour + 1U + equalFrom, closedHours, plausible ? "" : " - MISMATCH");
+}
+
+// nextAnswerIndex: where the next hour the node stores sits in the identity's answers.
+static void printPredictionStatus(const RespondPredictionPhase& phase, const RespondPredictionIdentity& identity, unsigned int nextAnswerIndex)
+{
+    if (phase.switchTick == 0)
+    {
+        printf("| prediction: training, %u computors qualified (threshold %u, deadline %u s) |",
+            phase.computorsQualified, phase.threshold, phase.deadlineSeconds);
+    }
+    else
+    {
+        printf("| prediction: ranking since tick %u, first counted hour %u, state digest %08x |",
+            phase.switchTick, phase.switchFirstHour, phase.foldedDigest);
+    }
+    if (identity.firstHour == 0)
+    {
+        printf(" this ID: not qualified |\n");
+        return;
+    }
+    unsigned int nextAnswer = 2;
+    if (nextAnswerIndex < PREDICTION_IDENTITY_ANSWERS && identity.answers[nextAnswerIndex] < 2)
+    {
+        nextAnswer = identity.answers[nextAnswerIndex];
+    }
+    const double accuracy = identity.hours ? (100.0 * identity.correct / identity.hours) : 0.0;
+    printf(" this ID: %u correct of %u counted hours (%.1f%%, from hour %u), answering solution %u/%u, next hour: %s |\n",
+        identity.correct, identity.hours, accuracy, identity.firstHour, identity.solutionTick, identity.solutionIndexInTick,
+        PREDICTION_ANSWER_NAMES[nextAnswer]);
+}
+
 // Derive the anchor digest for anchorTick as the node does: fetch the tick's stored TickData
 // (REQUEST_TICK_DATA) and hash K12(anchorTick || K12(TickData))
 // Returns 1 with anchorDigest filled, 0 when the node holds no TickData, -1 on network failure.
@@ -165,7 +306,10 @@ static int fetchAnchorDigest(ServerSocket& sock, unsigned int anchorTick, unsign
 
     static unsigned char tickData[TICK_DATA_SIZE];
 
-    for (int attempt = 0; attempt < 64; attempt++)
+    // The reply can sit behind many tick and vote broadcasts: bound the skip by time, not by count.
+    const std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (std::chrono::steady_clock::now() < deadline)
     {
         RequestResponseHeader header;
         if (!sock.receiveData((char*)&header, sizeof(header)))
@@ -380,7 +524,8 @@ struct OwnNode
     bool refKnown;                          // selfRef learned from the node's identity-tree listing
     bool lutChecked;                        // local ANN verified once against the node's stored ANN
     bool lutMismatch;                       // stored ANN differed; never extend this node
-    unsigned int resolveAttempts;           // resolve cycles seen while still unresolved (mismatch detector)
+    unsigned int submitTick;                // tick at submission
+    bool resolveWarned;                     // unresolved warning printed
     unsigned int selfTick;
     unsigned int selfSolutionIndexInTick;
     AntMinerT::ANN ann;                     // this node's evolved ANN (best network at mining time)
@@ -417,6 +562,128 @@ static unsigned int childCountOf(const std::vector<AntIdentityTreeNode>& listing
         }
     }
     return count;
+}
+
+// True when this miner already holds or has sent a child of the same parent with the same rating and
+// the same network. A walk that finds nothing better returns the network it started from, so once a
+// parent can be beaten without any change (its frame may slide further than when it was mined), every
+// nonce gives that same child again. A child the node never listed does not count, so it can be sent again.
+static bool sameChildAlreadySent(const std::vector<OwnNode>& ownNodes, unsigned int parentTick,
+    unsigned int parentSolutionIndexInTick, unsigned int score, unsigned int shift, const AntMinerT::ANN& ann)
+{
+    for (const OwnNode& node : ownNodes)
+    {
+        if (!node.refKnown && node.resolveWarned)
+        {
+            continue;
+        }
+        if (node.parentTick == parentTick
+            && node.parentSolutionIndexInTick == parentSolutionIndexInTick
+            && node.score == score
+            && node.shift == shift
+            && memcmp(&node.ann, &ann, sizeof(AntMinerT::ANN)) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+// A listing entry carries no nonce: a submission is found in the listing by score, anchor, depth and parent.
+static bool sameListingKey(const OwnNode& node, const AntIdentityTreeNode& entry)
+{
+    return entry.score == node.score
+        && entry.anchorTick == node.anchorTick
+        && entry.depth == node.depth
+        && entry.parentTick == node.parentTick
+        && entry.parentSolutionIndexInTick == node.parentSolutionIndexInTick;
+}
+
+// True when another own node would be found by the same listing entry as ownNodes[index].
+static bool hasTwin(const std::vector<OwnNode>& ownNodes, size_t index)
+{
+    const OwnNode& node = ownNodes[index];
+    for (size_t i = 0; i < ownNodes.size(); i++)
+    {
+        const OwnNode& other = ownNodes[i];
+        if (i != index
+            && other.score == node.score
+            && other.anchorTick == node.anchorTick
+            && other.depth == node.depth
+            && other.parentTick == node.parentTick
+            && other.parentSolutionIndexInTick == node.parentSolutionIndexInTick)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Gives each own node without a selfRef its entry of the node's listing. Returns how many own nodes have
+// a selfRef afterwards.
+// An entry is taken by one own node only. Two own nodes with the same score, anchor, depth and parent
+// cannot be told apart by the listing, so each of them takes only the entry whose stored network equals
+// its own. fetchStoredAnn(selfTick, selfSolutionIndexInTick, storedAnn) returns 1 when it has filled
+// storedAnn; with any other result the node stays without a selfRef until the next call.
+template <typename FetchStoredAnn>
+static unsigned int bindOwnNodes(std::vector<OwnNode>& ownNodes, const std::vector<AntIdentityTreeNode>& entries,
+    FetchStoredAnn fetchStoredAnn)
+{
+    std::vector<bool> claimed(entries.size(), false);
+    for (const OwnNode& node : ownNodes)
+    {
+        if (!node.refKnown)
+        {
+            continue;
+        }
+        for (size_t e = 0; e < entries.size(); e++)
+        {
+            if (entries[e].selfTick == node.selfTick
+                && entries[e].selfSolutionIndexInTick == node.selfSolutionIndexInTick)
+            {
+                claimed[e] = true;
+                break;
+            }
+        }
+    }
+
+    unsigned int resolved = 0;
+    for (size_t n = 0; n < ownNodes.size(); n++)
+    {
+        OwnNode& node = ownNodes[n];
+        if (node.refKnown)
+        {
+            resolved++;
+            continue;
+        }
+        const bool twin = hasTwin(ownNodes, n);
+        for (size_t e = 0; e < entries.size(); e++)
+        {
+            const AntIdentityTreeNode& entry = entries[e];
+            if (claimed[e] || !sameListingKey(node, entry))
+            {
+                continue;
+            }
+            if (twin)
+            {
+                unsigned char storedAnn[ANN_BYTES];
+                if (fetchStoredAnn(entry.selfTick, entry.selfSolutionIndexInTick, storedAnn) != 1
+                    || !annMatchesStored(node.ann, storedAnn))
+                {
+                    continue;
+                }
+                node.lutChecked = true;
+                node.lutMismatch = false;
+            }
+            claimed[e] = true;
+            node.refKnown = true;
+            node.selfTick = entry.selfTick;
+            node.selfSolutionIndexInTick = entry.selfSolutionIndexInTick;
+            resolved++;
+            break;
+        }
+    }
+    return resolved;
 }
 
 // Submit one ant solution as a BroadcastMessage whose decrypted gammingKey[0] selects
@@ -503,6 +770,10 @@ struct MineJob
     unsigned int anchorTick;
     unsigned char anchorDigest[32];
     unsigned int threshold;
+    // Task data of the anchor tick: the frame may slide to shiftLimit, targetCount targets are known.
+    unsigned int shiftLimit;
+    unsigned int targetCount;
+    unsigned char targets[BPP9000_TASK_DATA_MAX_TARGETS];
     bool valid;
 };
 static MineJob gJob;
@@ -522,75 +793,18 @@ struct MineResult
     unsigned int parentShift;
     unsigned int parentDepth;
     AntMinerT::ANN ann;
+    // The network's answer for each hour after the epoch's base hour: 0 = down, 1 = up, 2 = none.
+    unsigned char answers[PREDICTION_IDENTITY_ANSWERS];
 };
 static std::vector<MineResult> gResults;
 static std::mutex gResultsMutex;
 static std::atomic<unsigned long long> gIterations(0);
-
-// The bpp9000 task (topology + target series) the node scores against. A miner must use the same
-// pinned task or its scores will not match. Reads the raw file and returns pointers into the kept
-// buffer; the header hashes are not re-verified here (the node enforces them).
-static std::vector<unsigned char> gTaskBuffer;
-static const unsigned char* gTopoBlock = nullptr;
-static const unsigned char* gDataBlock = nullptr;
-static unsigned char gTaskTopoHash[32];   // K12 of the loaded topology block, compared to the node's canonical hash
-static unsigned char gTaskDataHash[32];   // K12 of the loaded data block
-
-static bool loadBpp9000TaskFile(const char* path)
-{
-    FILE* f = fopen(path, "rb");
-    if (!f)
-    {
-        printf("Cannot open task file: %s\n", path);
-        return false;
-    }
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (sz < (long)sizeof(task_file::TaskFileHeader))
-    {
-        printf("Task file too small.\n");
-        fclose(f);
-        return false;
-    }
-    gTaskBuffer.resize((size_t)sz);
-    if (fread(gTaskBuffer.data(), 1, (size_t)sz, f) != (size_t)sz)
-    {
-        printf("Task file read failed.\n");
-        fclose(f);
-        return false;
-    }
-    fclose(f);
-
-    const task_file::TaskFileHeader* h = (const task_file::TaskFileHeader*)gTaskBuffer.data();
-    if (h->magic != task_file::MAGIC)
-    {
-        printf("Task file bad magic.\n");
-        return false;
-    }
-    if (h->numPairs < score_bpp9000::SEQUENCE_LENGTH)
-    {
-        printf("Task file has fewer pairs than the scored sequence length.\n");
-        return false;
-    }
-    const unsigned long long topoBytes = task_file::topologyBytes(h->numInputTrits, h->numOutputTrits, h->population, h->numNeighbors);
-    // The canonical hashes cover only the scored sequenceLength pairs; pairs beyond them are an
-    // informational holdout tail.
-    const unsigned long long dataBytesLen = task_file::dataBytes(h->numInputTrits, h->numOutputTrits, score_bpp9000::SEQUENCE_LENGTH);
-    gTopoBlock = gTaskBuffer.data() + sizeof(task_file::TaskFileHeader);
-    gDataBlock = gTopoBlock + topoBytes;
-    KangarooTwelve(gTopoBlock, (unsigned int)topoBytes, gTaskTopoHash, 32);
-    KangarooTwelve(gDataBlock, (unsigned int)dataBytesLen, gTaskDataHash, 32);
-    printf("Loaded task: N=%u M=%u P=%u T=%llu.\n", h->numInputTrits, h->numOutputTrits, h->population, (unsigned long long)h->numPairs);
-    return true;
-}
 
 // Worker: pure compute, never touches the network. Own engine, shared read-only pool.
 static void mineWorker(const unsigned char* pool, const unsigned char* computorPublicKey, const unsigned char* spectrumDigest)
 {
     auto miner = std::make_unique<AntMinerT>();
     miner->setPool(pool);
-    miner->loadTaskFromMemory(gTopoBlock, gDataBlock);
     // Global control/output neurons, derived from the epoch digest alone (same for every identity).
     miner->deriveControlOutput(spectrumDigest);
 
@@ -618,15 +832,23 @@ static void mineWorker(const unsigned char* pool, const unsigned char* computorP
         // Make sure the nonce is canonical: nonce[1] carries L (bits 0-3) and the mutation mode (bits 4-5).
         nonce[0] = 1;                                                                                   // AlgoType::Bpp9000
         const unsigned char L = (unsigned char)((nonce[1] % score_bpp9000::MAX_CHANGES_PER_STEP) + 1);  // L in [1, 10]
-        const unsigned char mode = (unsigned char)(((nonce[1] >> 4) % 3) + 1);                          // mode in [1, 3]
+        const unsigned char mode = score_bpp9000::BPP9000_MODE_WIRING;                                  // the only canonical mode
         nonce[1] = (unsigned char)(L | (mode << 4));
-        nonce[2] = (unsigned char)(nonce[2] % (score_bpp9000::NUMBER_OF_MUTATIONS + 1));                // K in [0, 100]
+        nonce[2] = (unsigned char)(nonce[2] % (score_bpp9000::NUMBER_OF_MUTATIONS + 1));                // K: any byte value
+        // The job's targets are the ones the node grades this anchor tick on.
+        miner->loadTaskTargets(job.targets, job.targetCount);
         const score_bpp9000::Rating rating =
-            miner->computeScoreFromParent(job.parentAnn, job.parentShift, pubkey, nonce, job.anchorDigest);
+            miner->computeScoreFromParent(job.parentAnn, job.parentShift, pubkey, nonce, job.anchorDigest, job.shiftLimit);
         gIterations++;
 
         // Beat the parent, clear the frame-0 floor, and reject a timed-out or non-canonical walk.
-        const score_bpp9000::Rating parentRating{ job.parentScore, job.parentShift };
+        // The node judges a stored parent by its rating on this anchor tick's data, which the walk
+        // measured first; a ROOT parent has no rating to beat.
+        score_bpp9000::Rating parentRating{ job.parentScore, job.parentShift };
+        if (job.parentTick != ROOT_TICK)
+        {
+            parentRating = miner->parentRating;
+        }
         if (rating.isValid() && rating.isBetterThan(parentRating) && rating.clearsFloor(job.threshold))
         {
             MineResult result;
@@ -640,6 +862,8 @@ static void mineWorker(const unsigned char* pool, const unsigned char* computorP
             result.parentShift = job.parentShift;
             result.parentDepth = job.parentDepth;
             miner->getBestANN(result.ann);
+            // What this network answers is fixed now: the emits after the first frame, one per hour.
+            miner->collectOutputs(result.ann, score_bpp9000::WINDOW_WIDTH, PREDICTION_IDENTITY_ANSWERS, result.answers);
             std::lock_guard<std::mutex> guard(gResultsMutex);
             gResults.push_back(result);
         }
@@ -650,9 +874,9 @@ int main(int argc, char* argv[])
 {
     if (argc < 5 || argc > 11)
     {
-        printf("Usage: AntMiner [Node IP] [Node Port] [MiningID] [Signing Seed] [Threads] --task FILE [--operator SEED]\n");
+        printf("Usage: AntMiner [Node IP] [Node Port] [MiningID] [Signing Seed] [Threads] [--operator SEED]\n");
         printf("  Threads:     mining thread count; default = hardware cores - 1\n");
-        printf("  --task FILE: the pinned bpp9000 task file (required)\n");
+        printf("  The task data comes from the node, for every anchor tick; --task FILE is accepted and ignored.\n");
         printf("  --operator SEED: node operator seed for identity-tree queries; default = Signing Seed\n");
         return 1;
     }
@@ -744,6 +968,22 @@ int main(int argc, char* argv[])
     printf("Ant epoch context: threshold %u, freshness window %u ticks, %u solutions so far\n",
         epochContext.threshold, epochContext.freshnessWindow, epochContext.solutionCount);
 
+    // Prediction ranking status, read with every resolve cycle. Off for a node that does not answer the requests.
+    bool predictionStatus = true;
+    {
+        RespondPredictionPhase phase;
+        RespondPredictionIdentity identity;
+        if (queryPredictionPhase(sock, phase) && queryPredictionIdentity(sock, computorPublicKey, identity))
+        {
+            printPredictionStatus(phase, identity, PREDICTION_IDENTITY_ANSWERS);
+        }
+        else
+        {
+            predictionStatus = false;
+            printf("The node does not answer the prediction requests - no prediction status.\n");
+        }
+    }
+
     // Full pipeline start
     std::vector<unsigned char> sharedPool;
     std::unique_ptr<AntMinerT> miner;
@@ -752,30 +992,14 @@ int main(int argc, char* argv[])
     memset(&gJob, 0, sizeof(gJob));
     std::vector<std::thread> workers;
     {
-        if (!taskFilePath || !loadBpp9000TaskFile(taskFilePath))
+        if (taskFilePath)
         {
-            printf("A --task FILE is required for mining.\n");
-            return 1;
-        }
-        if (
-#if BPP9000_TASK_HAS_TOPOLOGY
-            memcmp(gTaskTopoHash, epochContext.topologyHash, 32) != 0 ||
-#endif
-            memcmp(gTaskDataHash, epochContext.dataHash, 32) != 0)
-        {
-            printf("TASK MISMATCH: your --task file is not the one the node scores against.\n");
-#if BPP9000_TASK_HAS_TOPOLOGY
-            printf("  topology block: %s\n", memcmp(gTaskTopoHash, epochContext.topologyHash, 32) ? "DIFFERS" : "ok");
-#endif
-            printf("  data block    : %s\n", memcmp(gTaskDataHash, epochContext.dataHash, 32) ? "DIFFERS" : "ok");
-            printf("Get the epoch's canonical bpp9000 task file - a wrong task wastes work and forfeits computor deposits.\n");
-            return 1;
+            printf("Note: --task %s is ignored; the task data comes from the node.\n", taskFilePath);
         }
         sharedPool.resize(POOL_VEC_PADDING_SIZE);
         generateRandom2Pool(epochContext.spectrumDigest, sharedPool.data());
         miner = std::make_unique<AntMinerT>();
         miner->setPool(sharedPool.data());
-        miner->loadTaskFromMemory(gTopoBlock, gDataBlock);
         // Global control/output neurons, derived from the epoch digest alone (same for every identity).
         miner->deriveControlOutput(epochContext.spectrumDigest);
         // Per-identity root: derived from this mining identity's public key (the pool carries the epoch's
@@ -802,6 +1026,10 @@ int main(int argc, char* argv[])
     std::vector<AntIdentityTreeNode> listing;
     unsigned long long submitted = 0;
     unsigned long long staleSkipped = 0;   // hits dropped because the anchor left the freshness window before submit
+    unsigned long long repeatSkipped = 0;  // hits that repeat a child already sent (same parent, rating and network)
+    unsigned long long weakSkipped = 0;    // hits not sent while this ID predicts: not better than its best network
+    // The epoch has switched and this ID has qualified: its last accepted solution is its predicting network.
+    bool predicting = false;
     unsigned int maxSubmitAge = 0;          // worst anchor age (ticks) among submitted solutions, vs freshnessWindow
     auto lastResolveTime = std::chrono::steady_clock::now();
     auto lastLutCheckTime = std::chrono::steady_clock::now();
@@ -809,6 +1037,10 @@ int main(int argc, char* argv[])
     unsigned int lastAnchorCandidateTick = 0xFFFFFFFFU;
     unsigned int cachedAnchorTick = 0xFFFFFFFFU;
     unsigned char cachedAnchorDigest[32];
+    // Task data of cachedAnchorTick. Static: the response is too large for the stack.
+    static RespondBpp9000TaskData cachedTaskData;
+    bool haveTaskData = false;
+    bool taskDataWarned = false;
 
     // Adopt the tree this identity already holds on the node, so a restart continues from the
     // on-chain frontier instead of climbing again from ROOT. One tree walk plus one ANN fetch per
@@ -897,7 +1129,9 @@ int main(int argc, char* argv[])
         const OwnNode* parentNode = NULL;
         for (const OwnNode& node : ownNodes)
         {
-            if (node.refKnown && !node.lutMismatch && (parentNode == NULL || node.score < parentNode->score))
+            if (node.refKnown && !node.lutMismatch
+                && (parentNode == NULL
+                    || score_bpp9000::Rating{ node.score, node.shift }.isBetterThan(score_bpp9000::Rating{ parentNode->score, parentNode->shift })))
             {
                 parentNode = &node;
             }
@@ -907,7 +1141,7 @@ int main(int argc, char* argv[])
         // root instead of the best, so we do not get stuck descending a single basin.
         unsigned long long exploreRoll = 0;
         _rdrand64_step(&exploreRoll);
-        if ((exploreRoll % ANT_EXPLORE_ONE_IN) == 0)
+        if (mayExplore(predicting, exploreRoll))
         {
             parentNode = NULL;   // root: a fresh basin
             if (!ownNodes.empty())
@@ -940,6 +1174,14 @@ int main(int argc, char* argv[])
             }
             continue;
         }
+        if (tickInfo.epoch != epochContext.epoch)
+        {
+            // The root, the pool and the task data all belong to the epoch the miner started in.
+            printf("Epoch changed from %u to %u - restart the miner.\n", (unsigned int)epochContext.epoch, (unsigned int)tickInfo.epoch);
+            // The mining threads run until this is set; without it the joins below never return.
+            state = 1;
+            break;
+        }
         if (tickInfo.tick <= tickInfo.initialTick)
         {
             // No completed tick in this epoch yet - previous-epoch anchors are not in the ring.
@@ -968,6 +1210,49 @@ int main(int argc, char* argv[])
                 std::this_thread::sleep_for(std::chrono::seconds(1));
                 continue;
             }
+            // The task data of this anchor tick: how far the frame may slide, and the targets up to there.
+            static RespondBpp9000TaskData taskData;
+            if (queryTaskData(sock, resolvedTick, taskData) < 0)
+            {
+                printf("Task data fetch failed, reconnecting...\n");
+                sock.closeConnection();
+                while (!state && !sock.establishConnection(nodeIp, nodePort))
+                {
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                }
+                continue;
+            }
+            if (!taskData.valid)
+            {
+                if (!taskDataWarned)
+                {
+                    taskDataWarned = true;
+                    printf("The node has no task data for anchor tick %u yet (no price series, or the tick is not processed) - waiting.\n", resolvedTick);
+                }
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                continue;
+            }
+            // The first frame of the targets must hash to the data hash of the epoch context.
+            unsigned char firstFrameHash[32];
+            KangarooTwelve(taskData.targets, (unsigned int)score_bpp9000::WINDOW_WIDTH, firstFrameHash, 32);
+            if (taskData.epoch != epochContext.epoch || memcmp(firstFrameHash, epochContext.dataHash, 32) != 0)
+            {
+                if (!taskDataWarned)
+                {
+                    taskDataWarned = true;
+                    printf("Task data of anchor tick %u does not match the epoch context (epoch or data hash) - waiting.\n", resolvedTick);
+                }
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                continue;
+            }
+            taskDataWarned = false;
+            if (!haveTaskData || taskData.shiftLimit != cachedTaskData.shiftLimit)
+            {
+                printf("Task data: anchor tick %u, %u hours after the epoch base (shift limit %u, %u targets)\n",
+                    resolvedTick, taskData.shiftLimit, taskData.shiftLimit, (unsigned int)score_bpp9000::WINDOW_WIDTH + taskData.shiftLimit);
+            }
+            cachedTaskData = taskData;
+            haveTaskData = true;
             lastAnchorCandidateTick = candidateTick;
             cachedAnchorTick = resolvedTick;
             // Same 8-byte prefix the node prints on F3 ("AntColony: anchor tick T digest=...");
@@ -993,7 +1278,11 @@ int main(int argc, char* argv[])
                 gJob.anchorTick = cachedAnchorTick;
                 memcpy(gJob.anchorDigest, cachedAnchorDigest, 32);
                 gJob.threshold = epochContext.threshold;
-                gJob.valid = true;
+                gJob.shiftLimit = cachedTaskData.shiftLimit;
+                gJob.targetCount = (unsigned int)score_bpp9000::WINDOW_WIDTH + cachedTaskData.shiftLimit;
+                memcpy(gJob.targets, cachedTaskData.targets, gJob.targetCount);
+                // A parent beyond this anchor's data cannot be extended; the next anchor will reach it.
+                gJob.valid = (parentShift <= cachedTaskData.shiftLimit);
             }
 
             // Drain worker hits: apply the per-parent child-cap gate, submit, track as own nodes.
@@ -1002,15 +1291,42 @@ int main(int argc, char* argv[])
                 std::lock_guard<std::mutex> guard(gResultsMutex);
                 results.swap(gResults);
             }
+            // The best network of this identity so far: listed by the node, or sent and still on its way.
+            // A solution the node dropped does not count.
+            score_bpp9000::Rating bestOwnRating = score_bpp9000::Rating::worst();
+            for (const OwnNode& node : ownNodes)
+            {
+                if (!node.refKnown && node.resolveWarned)
+                {
+                    continue;
+                }
+                const score_bpp9000::Rating nodeRating{ node.score, node.shift };
+                if (!node.lutMismatch && nodeRating.isBetterThan(bestOwnRating))
+                {
+                    bestOwnRating = nodeRating;
+                }
+            }
             bool submitFailed = false;
             for (size_t i = 0; i < results.size(); i++)
             {
                 const MineResult& r = results[i];
+                if (!shouldSend(predicting, score_bpp9000::Rating{ r.score, r.shift }, bestOwnRating))
+                {
+                    weakSkipped++;
+                    continue;
+                }
                 // On-time gate: if the anchor already left the freshness window, the node rejects it as
                 // stale and forfeits the deposit. Drop it and count the miss instead of submitting late.
                 if (tickInfo.tick > r.anchorTick + epochContext.freshnessWindow)
                 {
                     staleSkipped++;
+                    continue;
+                }
+                // The same child under another nonce adds nothing and only takes a place in the node's
+                // publish queue, which sends one solution per tick.
+                if (sameChildAlreadySent(ownNodes, r.parentTick, r.parentSolutionIndexInTick, r.score, r.shift, r.ann))
+                {
+                    repeatSkipped++;
                     continue;
                 }
                 // Threshold and beat-parent are already guaranteed by the mining; only the child
@@ -1051,13 +1367,29 @@ int main(int argc, char* argv[])
                 node.refKnown = false;
                 node.lutChecked = false;
                 node.lutMismatch = false;
-                node.resolveAttempts = 0;
+                node.submitTick = tickInfo.tick;
+                node.resolveWarned = false;
                 node.selfTick = 0;
                 node.selfSolutionIndexInTick = 0;
                 memcpy(&node.ann, &r.ann, sizeof(AntMinerT::ANN));
                 ownNodes.push_back(node);
                 printf("Submitted: depth %u, score %u (parent score %u), anchor %u\n",
                     node.depth, r.score, r.parentScore, r.anchorTick);
+                if (score_bpp9000::Rating{ r.score, r.shift }.isBetterThan(bestOwnRating))
+                {
+                    bestOwnRating = score_bpp9000::Rating{ r.score, r.shift };
+                }
+                if (haveTaskData)
+                {
+                    // The next hours the node has no price for yet; answers[k] is for hour baseHour + 1 + k.
+                    printf("  its answers if accepted:");
+                    for (unsigned int k = cachedTaskData.shiftLimit; k < cachedTaskData.shiftLimit + 3U && k < PREDICTION_IDENTITY_ANSWERS; k++)
+                    {
+                        const unsigned char answer = r.answers[k];
+                        printf(" hour %u %s", cachedTaskData.baseHour + 1U + k, PREDICTION_ANSWER_NAMES[answer < 2 ? answer : 2]);
+                    }
+                    printf("\n");
+                }
             }
             if (submitFailed)
             {
@@ -1133,79 +1465,78 @@ int main(int argc, char* argv[])
             if (queryOk)
             {
                 listing = entries;
-                unsigned int resolved = 0;
-
-                // A listing entry carries no nonce, so a submission is matched on
-                // (score, anchorTick, depth, parentRef). Two of our hits can share that tuple, so
-                // claim each entry as it binds - a plain first-match would give both the same
-                // selfRef. A swap between equal entries is caught by the LUT check above.
-                std::vector<bool> claimed(entries.size(), false);
-                for (const OwnNode& node : ownNodes)
-                {
-                    if (!node.refKnown)
+                const unsigned int resolved = bindOwnNodes(ownNodes, entries,
+                    [&](unsigned int selfTick, unsigned int selfSolutionIndexInTick, unsigned char* storedAnn)
                     {
-                        continue;
-                    }
-                    for (size_t e = 0; e < entries.size(); e++)
-                    {
-                        if (entries[e].selfTick == node.selfTick
-                            && entries[e].selfSolutionIndexInTick == node.selfSolutionIndexInTick)
-                        {
-                            claimed[e] = true;
-                            break;
-                        }
-                    }
-                }
+                        return queryParentAnn(sock, operatorSubseed, operatorPublicKey, selfTick, selfSolutionIndexInTick, storedAnn);
+                    });
 
                 for (OwnNode& node : ownNodes)
                 {
-                    if (node.refKnown)
+                    if (!node.refKnown && !node.resolveWarned
+                        && tickInfo.tick > node.submitTick + 2U * ANT_SETTLEMENT_WINDOW_TICKS)
                     {
-                        resolved++;
-                        continue;
-                    }
-                    for (size_t e = 0; e < entries.size(); e++)
-                    {
-                        if (claimed[e])
-                        {
-                            continue;
-                        }
-                        const AntIdentityTreeNode& entry = entries[e];
-                        if (entry.score == node.score
-                            && entry.anchorTick == node.anchorTick
-                            && entry.depth == node.depth
-                            && entry.parentTick == node.parentTick
-                            && entry.parentSolutionIndexInTick == node.parentSolutionIndexInTick)
-                        {
-                            claimed[e] = true;
-                            node.refKnown = true;
-                            node.selfTick = entry.selfTick;
-                            node.selfSolutionIndexInTick = entry.selfSolutionIndexInTick;
-                            resolved++;
-                            break;
-                        }
-                    }
-                    if (!node.refKnown)
-                    {
-                        node.resolveAttempts++;
-                        if (node.resolveAttempts == 3U)
-                        {
-                            // The node recomputes the score from (pubkey, parentRef, anchorTick,
-                            // nonce); if our score never appears on-chain, the recomputation
-                            // disagreed with ours - the anchor digest is the prime suspect.
-                            printf("WARNING: solution (score %u, anchor %u) not accepted after %u resolve cycles - possible anchor digest mismatch, compare 'Anchor tick N digest=' with the node's F3 line\n",
-                                node.score, node.anchorTick, node.resolveAttempts);
-                        }
+                        // A submission enters the listing one settlement window after the node
+                        // publishes it; twice that is past anything still on its way. The node
+                        // sends no reject reply.
+                        node.resolveWarned = true;
+                        printf("WARNING: solution (score %u, anchor %u, parent %u/%u) is not in the identity tree %u ticks after submission - the node dropped it; its F3 'AntPool:' line counts the drops by reason (claim mismatch = its score differs from ours, check the anchor digest)\n",
+                            node.score, node.anchorTick, node.parentTick, node.parentSolutionIndexInTick,
+                            tickInfo.tick - node.submitTick);
                     }
                 }
 
                 RespondAntEpochContext refreshed;
                 if (queryEpochContext(sock, refreshed))
                 {
-                    epochContext = refreshed;
+                    if (refreshed.epoch != epochContext.epoch)
+                    {
+                        printf("Epoch changed from %u to %u - restart the miner.\n", (unsigned int)epochContext.epoch, (unsigned int)refreshed.epoch);
+                        state = 1;
+                        break;
+                    }
+                    // The digests and hashes stay those of the start.
+                    epochContext.threshold = refreshed.threshold;
+                    epochContext.freshnessWindow = refreshed.freshnessWindow;
+                    epochContext.solutionCount = refreshed.solutionCount;
+                    epochContext.freeAnnSlotsCount = refreshed.freeAnnSlotsCount;
+                    epochContext.maxChildrenPerParent = refreshed.maxChildrenPerParent;
                 }
-                printf("| %llu iterations | %llu submitted | %llu stale-skipped | max-anchor-age %u/%u | %u/%zu accepted+resolved | tree size %u |\n",
-                    gIterations.load(), submitted, staleSkipped, maxSubmitAge, epochContext.freshnessWindow, resolved, ownNodes.size(), epochContext.solutionCount);
+                printf("| %llu iterations | %llu submitted | %llu stale-skipped | %llu repeat-skipped | %llu weak-skipped | max-anchor-age %u/%u | %u/%zu accepted+resolved | tree size %u |\n",
+                    gIterations.load(), submitted, staleSkipped, repeatSkipped, weakSkipped, maxSubmitAge, epochContext.freshnessWindow, resolved, ownNodes.size(), epochContext.solutionCount);
+                if (predictionStatus)
+                {
+                    RespondPredictionPhase phase;
+                    RespondPredictionIdentity identity;
+                    if (queryPredictionPhase(sock, phase) && queryPredictionIdentity(sock, computorPublicKey, identity))
+                    {
+                        // The task data holds shiftLimit hours after the base hour, so the next hour is answers[shiftLimit].
+                        printPredictionStatus(phase, identity, haveTaskData ? cachedTaskData.shiftLimit : PREDICTION_IDENTITY_ANSWERS);
+
+                        const bool predictingNow = (phase.switchTick != 0 && identity.firstHour != 0);
+                        if (predictingNow && !predicting)
+                        {
+                            printf("This ID predicts now: only a solution that beats its best network is sent, and no exploration from other nodes.\n");
+                        }
+                        predicting = predictingNow;
+
+                        if (identity.firstHour != 0 && haveTaskData)
+                        {
+                            for (const OwnNode& node : ownNodes)
+                            {
+                                if (node.refKnown && !node.lutMismatch
+                                    && node.selfTick == identity.solutionTick && node.selfSolutionIndexInTick == identity.solutionIndexInTick)
+                                {
+                                    unsigned char computed[PREDICTION_IDENTITY_ANSWERS];
+                                    miner->collectOutputs(node.ann, score_bpp9000::WINDOW_WIDTH, PREDICTION_IDENTITY_ANSWERS, computed);
+                                    printAnswerCheck(node.selfTick, node.selfSolutionIndexInTick, computed, identity.answers,
+                                        identity.baseHour, cachedTaskData.shiftLimit);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
             }
             else
             {

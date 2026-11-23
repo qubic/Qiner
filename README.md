@@ -106,6 +106,69 @@ Standalone bpp9000 mining (`Qiner`) searches from your identity's root network f
 
 Trees are **per-identity**: a forest, one tree per mining identity, and you only ever extend your own nodes. `AntMiner.cpp` is the reference implementation; the Standalone `Qiner` is unchanged and still available.
 
+## Live task data (draft)
+
+The task data is no longer a pinned task file. It is built from hourly BTC/USDT prices that the nodes fetch on-chain, and it grows by one hour at a time during the epoch. What this changes for a miner:
+
+- **Task data per anchor tick** - a solution is graded on the targets known before its anchor tick. Ask the node for them (`REQUEST_BPP9000_TASK_DATA`, 80 / 81); the answer also carries the **shift limit**, the last frame a solution with that anchor tick may reach.
+- **Parent within the shift limit** - a child whose parent's shift is above the shift limit of the child's anchor tick gets no score.
+- **Beat the parent on the same data** - a child of a stored parent must beat that parent rated on the child's task data, not only the parent's recorded rating; otherwise it gets no score and the deposit is kept. A child of the root is exempt.
+- **One solution per identity per tick** - of several solution transactions of one identity in the same tick, the node processes only the one at the highest transaction index; the others are skipped and their deposit is returned. A node publishes one queued solution per computor per tick, so `AntMiner` needs no extra gate.
+
+`AntMiner` implements the first three (mining loop, steps 5b and 6). It mines for the epoch it was started in and stops when the node reports another epoch; start it again for the new epoch. Full rules and wire layouts: core `doc/ant_colony_mining.md`, sections 2.3a and 2.7(d). The Standalone `Qiner` sections below describe the standalone program and its task file; the node takes its task data from the price series and counts bpp9000 solutions only through the ant colony.
+
+**Bootstrap file of the first live epoch** (for whoever builds the release): `python3 tools/fetch_btc_prices.py --out btc_prices.csv` writes the last 8929 hourly prices, and `btc_price_bootstrap btc_prices.csv <epoch>` turns them into `btc_price_bootstrap.bin` and prints `BTC_FEED_MIN_HOUR` and `BTC_PRICE_BOOTSTRAP_HASH` for core `src/public_settings.h`. Both print the time range of the prices; `--period-sec` must equal the node's `BTC_FEED_PERIOD_SEC` (3600 on mainnet).
+
+## Prediction phase
+
+During an epoch the ranking can switch from training to prediction. An identity **qualifies** with an accepted solution at shift >= 1, or at shift 0 with at most `threshold` errors. Once enough computors have qualified, the epoch switches. From then on the network of a qualified identity answers every coming hour with "up" or "down", the node counts the hours it got right, and once it has 12 correct hours the identity is ranked by its accuracy (correct hours / counted hours). The rules are in core `doc/ant_colony_mining.md`, section 2.4a. What matters for a miner:
+
+- **Answers** - a network's answer for hour `baseHour + 1 + k` is its output at emit `8760 + k`: `0` = down, `1` = up, `2` = none. A network has no inputs, so its answers are fixed when it is created. `collectOutputs()` in `src/score_bpp9000.h` computes them.
+- **Which network answers** - before the switch the identity's best network, after the switch its last accepted solution, also a weaker one.
+- **Deadline** - a solution answers an hour only if it is executed at least `deadlineSeconds` before that hour; a later one answers from the next hour on.
+- **Counting** - an hour is counted when its price is stored. An hour without a price is counted for nobody.
+
+Two requests, neither signed (layouts in `src/ant/ant_colony_message.h`):
+
+| Request | Types | Reply |
+|---|---|---|
+| `REQUEST_PREDICTION_PHASE`, no payload | 82 / 83 | `switchTick` (0 = training), `switchFirstHour`, `computorsQualified`, `threshold`, `deadlineSeconds`, `foldedDigest` (24 bytes) |
+| `REQUEST_PREDICTION_IDENTITY`, a 32-byte public key | 84 / 85 | `firstHour` (0 = not qualified), `hours`, `correct`, `solutionTick`, `solutionIndexInTick`, `baseHour`, `answers[168]` (192 bytes) |
+
+`foldedDigest` is a digest of the node's prediction state. Two nodes in sync report the same value; it is 0 in training.
+
+**What `AntMiner` does**
+
+- It computes the answers of every solution before sending it and prints the next three:
+  ```
+  Submitted: depth 4, score 4391 (parent score 4402), anchor 91688351
+    its answers if accepted: hour 2423871 up hour 2423872 down hour 2423873 up
+  ```
+- It reads both requests with every resolve cycle and prints the phase and the state of its identity:
+  ```
+  | prediction: training, 131 computors qualified (threshold 3504, deadline 1800 s) | this ID: not qualified |
+  | prediction: ranking since tick 91688106, first counted hour 494123, state digest 5f1c22a0 | this ID: 7 correct of 12 counted hours (58.3%, from hour 494123), answering solution 91688342/17, next hour: up |
+  ```
+- It checks the answers the node holds for its identity against the ones it computes from the same network. A solution replaces only the hours that were still open when it was executed, so the check counts the hours from the last difference on:
+  ```
+  | answers of solution 91688342/17 computed here: equal to the node's for the 152 hours from hour 494140 on, 2 earlier hours were closed |
+  ```
+  The line ends in `MISMATCH` when no hour is equal or more than 24 earlier hours differ.
+A node without the two requests gives no reply: `AntMiner` waits 20 seconds once at start, prints `no prediction status`, and mines as before.
+
+**Reference prediction strategy: the best network predicts**
+
+The node takes the *last accepted* solution of an identity as its predicting network, also when that solution is weaker than an earlier one. `AntMiner` therefore changes two things once the epoch has switched and its identity has qualified:
+
+| | In training | While the identity predicts |
+|---|---|---|
+| Parent of the next walk | the best own node; 1 round in 8 a random own node or the root | the best own node only |
+| Which hits are sent | every hit | only a hit that beats the best network; the others are counted as `weak-skipped` |
+
+So the predicting network is always the identity's best one, and every new predictor is a direct improvement of the one before. `AntMiner` does not choose its answers by any other information: the network that scores best on the known prices predicts.
+
+In the code this is one block at `Prediction strategy (reference)` in `src/ant/AntMiner.cpp` with two functions: `mayExplore()` decides the parent, `shouldSend()` decides which hits go out. A miner with another strategy changes these two; the answers of a hit are in `MineResult::answers` before it is sent.
+
 ## Where the tree lives
 
 The authoritative tree lives on the **node** - it is the consensus store (a per-identity forest), and every accepted solution becomes a node in it. The node also recomputes every claimed score deterministically and gates acceptance, so the miner's real job is to reproduce the node's score bit-exactly and submit on time. Everything the miner keeps locally is advisory; consensus lives on the node.
@@ -122,28 +185,29 @@ The node still owns what only it can: the epoch context (root seed, threshold, f
 `AntMiner` builds alongside `Qiner` from the same CMake / `Qiner.sln` (target `AntMiner`).
 
 ```
-./AntMiner <Node IP> <Node Port> <MiningID> <Signing Seed> [Threads] --task <task file> [--operator SEED]
+./AntMiner <Node IP> <Node Port> <MiningID> <Signing Seed> [Threads] [--operator SEED]
 ```
-There is **no Mining Seed argument** (unlike the Standalone `Qiner`): the pool seed is the epoch spectrum digest, which `AntMiner` reads from the node's epoch context - so it cannot mine a wrong or stale pool by hand. `--task` is required and must be the epoch's pinned task file; `AntMiner` checks its topology/data hashes against the node's canonical hashes and refuses to mine on a mismatch (a wrong task wastes work and forfeits deposits).
+There is **no Mining Seed argument** (unlike the Standalone `Qiner`): the pool seed is the epoch spectrum digest, which `AntMiner` reads from the node's epoch context - so it cannot mine a wrong or stale pool by hand. There is **no task file** either: the task data is built from live hourly BTC/USDT prices, and `AntMiner` reads it from the node for every anchor tick (`REQUEST_BPP9000_TASK_DATA`). `--task FILE` is still accepted and ignored.
 - **Signing Seed** signs the solution `BROADCAST_MESSAGE`s. Its identity must hold enough QUs for message dissemination (`MESSAGE_DISSEMINATION_THRESHOLD`) and must not be the MiningID itself (the node treats a self-signed message as encrypted).
 - **`--operator SEED`** signs the identity-tree queries (`REQUEST_ANT_IDENTITY_TREE`).
 
 Example:
 ```
-./AntMiner 192.168.1.2 31841 BZBQ...WLZBQEXK aaaa...aaa 8 --task task_bpp9000.bin --operator bbbb...bbb
+./AntMiner 192.168.1.2 31841 BZBQ...WLZBQEXK aaaa...aaa 8 --operator bbbb...bbb
 ```
 
 ## The mining loop
 
 What `AntMiner` does each round:
 
-1. **Epoch context** (`REQUEST_ANT_EPOCH_CONTEXT`) - spectrum digest (seeds the `random2` pool), canonical task hashes, threshold, freshness window, per-parent child cap.
-2. **Task check** - load `--task`, require its topology/data hashes to equal the node's; abort otherwise.
+1. **Epoch context** (`REQUEST_ANT_EPOCH_CONTEXT`) - spectrum digest (seeds the `random2` pool), the data hash of the epoch's task data, threshold, freshness window, per-parent child cap.
+2. **No task file** - the task data comes from the node, per anchor tick (step 5b).
 3. **Root** - `deriveRootANN(publicKey)` from the pool: this identity's own root network, so every tree starts from a different one. Never stored on-chain; you compute it. The spectrum digest seeds the pool; the public key selects where in it the root material is read.
 3b. **Adopt the existing tree** (startup only) - page this identity's tree (`REQUEST_ANT_IDENTITY_TREE`) and fetch each node's stored ANN (`REQUEST_ANT_PARENT_ANN`), adopting the bytes directly, so a restart resumes from the on-chain frontier instead of the root. Nothing is persisted locally; the node is the source of truth. Costs one tree walk plus one ANN fetch per node. A node whose ANN the pool evicted is kept for bookkeeping but never extended, and without `--operator` the query is refused and the miner warns it is restarting from ROOT.
 4. **Parent selection** - the best resolved own node (lowest score = deepest frontier), else the root. 1-in-8 rounds explore a random resolved node or the root instead, so the search does not lock into one basin. (Pools tune this policy.)
 5. **Anchor first** - pick the latest completed tick (stepping back past ticks the node stored no data for). Its digest `K12(anchorTick \|\| K12(TickData))` is part of the child RNG seed, so the anchor is fixed *before* mining and keeps the hit inside the freshness window.
-6. **Search** - random canonical nonce, `computeScoreFromParent(parentANN, pubkey, nonce, anchorDigest)`; keep a hit when `score <= threshold` and `score < parentScore`.
+5b. **Task data of the anchor tick** (`REQUEST_BPP9000_TASK_DATA`) - the node answers with the **shift limit** of that tick and `8760 + shiftLimit` targets (one byte per hour, `0` or `1`). The targets are the hourly BTC/USDT price moves known before the anchor tick; every hour the node stores during the epoch adds one target and raises the shift limit by one (at most 168). The miner checks that the first 8760 targets hash (K12) to `dataHash` of the epoch context, hands the targets to the scorer (`loadTaskTargets`), and does not mine a parent whose shift is above the shift limit - the node gives such a child no score.
+6. **Search** - random canonical nonce, `computeScoreFromParent(parentANN, parentShift, pubkey, nonce, anchorDigest, shiftLimit)`; the frame slides no further than `shiftLimit`. The walk first rates the unmutated parent on the same targets (`parentRating`). Keep a hit when the child's rating `(shift, error)` beats `parentRating` (a child of the root has no rating to beat) and clears the frame-0 floor (`shift > 0` or `error <= threshold`). The node applies the same parent test: a child of a stored parent that does not beat the parent rated on the child's task data gets no score, and the deposit is kept.
 7. **Submit** - only if the anchor is still inside the freshness window (else drop as stale) and the parent is under its child cap. The cap is checked against the node's own `childCount` from the last tree read plus any submissions it has not caught up with yet - never against a counter local to this process, which a restart would silently reset.
 
    **Why the miner gates this.** Your `BROADCAST_MESSAGE` is free, but it is half the path: the computor turns an accepted message into an `AntColonyMiningSolutionTransaction` funded with `SOLUTION_SECURITY_DEPOSIT` from its own balance, refunded only on `Valid`/`ValidNotStored` with a matching claimed score. Every reject keeps the deposit. The node pre-filters duplicates and over-cap candidates, but `childCount` only grows, so a parent can reach the cap between publication and execution - a race only the miner can reduce. A miner submitting solutions the node will reject is spending its computor's money. Sent as a `BROADCAST_MESSAGE` whose decrypted `gammingKey[0] == 3` (`MESSAGE_TYPE_ANT_SOLUTION`); payload = parent ref + anchor tick + claimed score + nonce.
@@ -160,8 +224,8 @@ What `AntMiner` does each round:
 |---|---|---|
 | `nonce[0]` | algorithm select | `1` (bpp9000) |
 | `nonce[1]` bits 0-3 | `L` - changes per mutation step | `[1, 10]` (`MAX_CHANGES_PER_STEP`) |
-| `nonce[1]` bits 4-5 | mutation mode: 1 = start state, 2 = wiring, 3 = LUTs (bits 6-7 = 0) | `[1, 3]` |
-| `nonce[2]` | `K` - explore-phase length (anti-attractor) | `[0, 100]` (`NUMBER_OF_MUTATIONS`) |
+| `nonce[1]` bits 4-5 | mutation mode: 2 = wiring is the only canonical mode (bits 6-7 = 0) | `2` |
+| `nonce[2]` | `K` - explore-phase length (anti-attractor) | any byte value (`<= NUMBER_OF_MUTATIONS`) |
 | `nonce[3..31]` | search-path seed | any |
 
 The Standalone `Qiner` uses the same `nonce[1]` layout but forces `K = 0`; the scorer no longer clamps, so both paths require `L`, the mode, and `K` already in range.
@@ -172,7 +236,7 @@ Both entry points feed the same anti-attractor local search (`computeScoreFromCu
 
 | Aspect | Standalone (`Qiner`) | Ant (`AntMiner`) |
 |---|---|---|
-| Entry | `computeScore(pubkey, nonce)` | `deriveRootANN` + `computeScoreFromParent(parentANN, parentShift, pubkey, nonce, anchorDigest)` |
+| Entry | `computeScore(pubkey, nonce)` | `deriveRootANN` + `loadTaskTargets(targets, count)` + `computeScoreFromParent(parentANN, parentShift, pubkey, nonce, anchorDigest, shiftLimit)` |
 | Starting network | task wiring + start state/LUTs from `K12(pubkey)` - your root | the parent's network (root or a fetched node) |
 | Mutation seeds | `K12(pubkey \|\| nonce[3..31])` | `K12(pubkey \|\| nonce[3..31] \|\| anchorDigest)` - anchor-bound |
 | `K` (explore) | forced 0 | `nonce[2]` |
@@ -226,9 +290,12 @@ numberOfWindows = T - W        // data room the frame may slide within
 maxTicks = MAX_NUMBER_OF_TICKS // rollout tick budget; exceeding it fails the network
 S = NUMBER_OF_MUTATIONS        // search steps
 
-advanceThreshold = W / 3       // frame error at or below this advances shift by 1
+advanceThreshold = ADVANCE_THRESHOLD  // frame error at or below this advances shift by 1; must equal the node's
+                                      // BPP9000_ADVANCE_THRESHOLD (default in score_bpp9000.h, build option
+                                      // QINER_BPP9000_ADVANCE_THRESHOLD)
 shiftCap         = 24 * 7      // highest frame the miner may reach; production predicts one week ahead
-SOLUTION_THRESHOLD = W * 45 / 100   // frame-0 floor, applies only at shift 0
+SOLUTION_THRESHOLD                 // frame-0 floor, applies only at shift 0; the node sends the epoch's value in
+                                   // its epoch context
 ```
 
 ## Rating
