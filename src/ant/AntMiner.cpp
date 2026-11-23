@@ -589,6 +589,103 @@ static bool sameChildAlreadySent(const std::vector<OwnNode>& ownNodes, unsigned 
     return false;
 }
 
+// A listing entry carries no nonce: a submission is found in the listing by score, anchor, depth and parent.
+static bool sameListingKey(const OwnNode& node, const AntIdentityTreeNode& entry)
+{
+    return entry.score == node.score
+        && entry.anchorTick == node.anchorTick
+        && entry.depth == node.depth
+        && entry.parentTick == node.parentTick
+        && entry.parentSolutionIndexInTick == node.parentSolutionIndexInTick;
+}
+
+// True when another own node would be found by the same listing entry as ownNodes[index].
+static bool hasTwin(const std::vector<OwnNode>& ownNodes, size_t index)
+{
+    const OwnNode& node = ownNodes[index];
+    for (size_t i = 0; i < ownNodes.size(); i++)
+    {
+        const OwnNode& other = ownNodes[i];
+        if (i != index
+            && other.score == node.score
+            && other.anchorTick == node.anchorTick
+            && other.depth == node.depth
+            && other.parentTick == node.parentTick
+            && other.parentSolutionIndexInTick == node.parentSolutionIndexInTick)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Gives each own node without a selfRef its entry of the node's listing. Returns how many own nodes have
+// a selfRef afterwards.
+// An entry is taken by one own node only. Two own nodes with the same score, anchor, depth and parent
+// cannot be told apart by the listing, so each of them takes only the entry whose stored network equals
+// its own. fetchStoredAnn(selfTick, selfSolutionIndexInTick, storedAnn) returns 1 when it has filled
+// storedAnn; with any other result the node stays without a selfRef until the next call.
+template <typename FetchStoredAnn>
+static unsigned int bindOwnNodes(std::vector<OwnNode>& ownNodes, const std::vector<AntIdentityTreeNode>& entries,
+    FetchStoredAnn fetchStoredAnn)
+{
+    std::vector<bool> claimed(entries.size(), false);
+    for (const OwnNode& node : ownNodes)
+    {
+        if (!node.refKnown)
+        {
+            continue;
+        }
+        for (size_t e = 0; e < entries.size(); e++)
+        {
+            if (entries[e].selfTick == node.selfTick
+                && entries[e].selfSolutionIndexInTick == node.selfSolutionIndexInTick)
+            {
+                claimed[e] = true;
+                break;
+            }
+        }
+    }
+
+    unsigned int resolved = 0;
+    for (size_t n = 0; n < ownNodes.size(); n++)
+    {
+        OwnNode& node = ownNodes[n];
+        if (node.refKnown)
+        {
+            resolved++;
+            continue;
+        }
+        const bool twin = hasTwin(ownNodes, n);
+        for (size_t e = 0; e < entries.size(); e++)
+        {
+            const AntIdentityTreeNode& entry = entries[e];
+            if (claimed[e] || !sameListingKey(node, entry))
+            {
+                continue;
+            }
+            if (twin)
+            {
+                unsigned char storedAnn[ANN_BYTES];
+                if (fetchStoredAnn(entry.selfTick, entry.selfSolutionIndexInTick, storedAnn) != 1
+                    || !annMatchesStored(node.ann, storedAnn))
+                {
+                    continue;
+                }
+                node.lutChecked = true;
+                node.lutMismatch = false;
+            }
+            claimed[e] = true;
+            node.refKnown = true;
+            node.selfTick = entry.selfTick;
+            node.selfSolutionIndexInTick = entry.selfSolutionIndexInTick;
+            resolved++;
+            break;
+        }
+    }
+    return resolved;
+}
+
 // Submit one ant solution as a BroadcastMessage whose decrypted gammingKey[0] selects
 // MESSAGE_TYPE_ANT_SOLUTION
 static bool submitAntSolution(ServerSocket& sock,
@@ -1363,58 +1460,14 @@ int main(int argc, char* argv[])
             if (queryOk)
             {
                 listing = entries;
-                unsigned int resolved = 0;
-
-                // A listing entry carries no nonce, so a submission is matched on
-                // (score, anchorTick, depth, parentRef). Two of our hits can share that tuple, so
-                // claim each entry as it binds - a plain first-match would give both the same
-                // selfRef. A swap between equal entries is caught by the LUT check above.
-                std::vector<bool> claimed(entries.size(), false);
-                for (const OwnNode& node : ownNodes)
-                {
-                    if (!node.refKnown)
+                const unsigned int resolved = bindOwnNodes(ownNodes, entries,
+                    [&](unsigned int selfTick, unsigned int selfSolutionIndexInTick, unsigned char* storedAnn)
                     {
-                        continue;
-                    }
-                    for (size_t e = 0; e < entries.size(); e++)
-                    {
-                        if (entries[e].selfTick == node.selfTick
-                            && entries[e].selfSolutionIndexInTick == node.selfSolutionIndexInTick)
-                        {
-                            claimed[e] = true;
-                            break;
-                        }
-                    }
-                }
+                        return queryParentAnn(sock, operatorSubseed, operatorPublicKey, selfTick, selfSolutionIndexInTick, storedAnn);
+                    });
 
                 for (OwnNode& node : ownNodes)
                 {
-                    if (node.refKnown)
-                    {
-                        resolved++;
-                        continue;
-                    }
-                    for (size_t e = 0; e < entries.size(); e++)
-                    {
-                        if (claimed[e])
-                        {
-                            continue;
-                        }
-                        const AntIdentityTreeNode& entry = entries[e];
-                        if (entry.score == node.score
-                            && entry.anchorTick == node.anchorTick
-                            && entry.depth == node.depth
-                            && entry.parentTick == node.parentTick
-                            && entry.parentSolutionIndexInTick == node.parentSolutionIndexInTick)
-                        {
-                            claimed[e] = true;
-                            node.refKnown = true;
-                            node.selfTick = entry.selfTick;
-                            node.selfSolutionIndexInTick = entry.selfSolutionIndexInTick;
-                            resolved++;
-                            break;
-                        }
-                    }
                     if (!node.refKnown && !node.resolveWarned
                         && tickInfo.tick > node.submitTick + 2U * ANT_SETTLEMENT_WINDOW_TICKS)
                     {
