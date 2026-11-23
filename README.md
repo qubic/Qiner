@@ -121,7 +121,7 @@ The task data is no longer a pinned task file. It is built from hourly BTC/USDT 
 
 ## Prediction phase
 
-During an epoch the ranking can switch from training to prediction. An identity **qualifies** with an accepted solution at shift >= 1, or at shift 0 with at most `threshold` errors. Once enough computors have qualified, the epoch switches. From then on the network of a qualified identity answers every coming hour with "up" or "down", the node counts the hours it got right, and with enough counted hours the identity is ranked by its accuracy (correct hours / counted hours). The rules are in core `doc/ant_colony_mining.md`, section 2.4a. What matters for a miner:
+During an epoch the ranking can switch from training to prediction. An identity **qualifies** with an accepted solution at shift >= 1, or at shift 0 with at most `threshold` errors. Once enough computors have qualified, the epoch switches. From then on the network of a qualified identity answers every coming hour with "up" or "down", the node counts the hours it got right, and once it has 12 correct hours the identity is ranked by its accuracy (correct hours / counted hours). The rules are in core `doc/ant_colony_mining.md`, section 2.4a. What matters for a miner:
 
 - **Answers** - a network's answer for hour `baseHour + 1 + k` is its output at emit `8760 + k`: `0` = down, `1` = up, `2` = none. A network has no inputs, so its answers are fixed when it is created. `collectOutputs()` in `src/score_bpp9000.h` computes them.
 - **Which network answers** - before the switch the identity's best network, after the switch its last accepted solution, also a weaker one.
@@ -146,7 +146,7 @@ Two requests, neither signed (layouts in `src/ant/ant_colony_message.h`):
   ```
 - It reads both requests with every resolve cycle and prints the phase and the state of its identity:
   ```
-  | prediction: training, 131 computors qualified (threshold 3504, deadline 3000 s) | this ID: not qualified |
+  | prediction: training, 131 computors qualified (threshold 3504, deadline 1800 s) | this ID: not qualified |
   | prediction: ranking since tick 91688106, first counted hour 494123, state digest 5f1c22a0 | this ID: 7 correct of 12 counted hours (58.3%, from hour 494123), answering solution 91688342/17, next hour: up |
   ```
 - It checks the answers the node holds for its identity against the ones it computes from the same network. A solution replaces only the hours that were still open when it was executed, so the check counts the hours from the last difference on:

@@ -1291,10 +1291,15 @@ int main(int argc, char* argv[])
                 std::lock_guard<std::mutex> guard(gResultsMutex);
                 results.swap(gResults);
             }
-            // The best network of this identity so far, listed by the node or not yet.
+            // The best network of this identity so far: listed by the node, or sent and still on its way.
+            // A solution the node dropped does not count.
             score_bpp9000::Rating bestOwnRating = score_bpp9000::Rating::worst();
             for (const OwnNode& node : ownNodes)
             {
+                if (!node.refKnown && node.resolveWarned)
+                {
+                    continue;
+                }
                 const score_bpp9000::Rating nodeRating{ node.score, node.shift };
                 if (!node.lutMismatch && nodeRating.isBetterThan(bestOwnRating))
                 {
