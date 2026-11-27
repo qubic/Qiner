@@ -176,7 +176,7 @@ struct RespondPredictionPhase
     unsigned int switchTick;            // 0: training. Else the tick the epoch switched to the prediction ranking in
     unsigned int switchFirstHour;       // first hour that counts, 0 in training
     unsigned int computorsQualified;
-    unsigned int threshold;             // an identity qualifies at shift >= 1, or at shift 0 with at most this many errors
+    unsigned int threshold;             // only a solution with at most this many errors in its frame answers; the first one qualifies the identity
     unsigned int deadlineSeconds;       // a solution answers an hour if it is executed at least this long before the hour
     unsigned int foldedDigest;          // digest of the node's prediction state at its last fold into the mining digest
 };

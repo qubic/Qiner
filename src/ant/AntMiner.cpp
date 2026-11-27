@@ -206,9 +206,9 @@ static bool queryPredictionIdentity(ServerSocket& sock, const unsigned char* pub
 // Prediction strategy (reference)
 //
 // What the node does: once the epoch has switched and an identity has qualified, the identity's LAST
-// ACCEPTED solution is its predicting network, also when it is weaker than an earlier one. Every hour
-// the answer of that network is compared with the price move, and the identity is ranked by its
-// accuracy (correct hours / counted hours).
+// ACCEPTED solution within the prediction threshold is its predicting network, also when it is weaker
+// than an earlier one. Every hour the answer of that network is compared with the price move, and the
+// identity is ranked by its accuracy (correct hours / counted hours).
 //
 // What this miner does: the best network predicts.
 //   1. It knows the answers of a solution before sending it (collectOutputs() on the hit's network).
@@ -1028,7 +1028,7 @@ int main(int argc, char* argv[])
     unsigned long long staleSkipped = 0;   // hits dropped because the anchor left the freshness window before submit
     unsigned long long repeatSkipped = 0;  // hits that repeat a child already sent (same parent, rating and network)
     unsigned long long weakSkipped = 0;    // hits not sent while this ID predicts: not better than its best network
-    // The epoch has switched and this ID has qualified: its last accepted solution is its predicting network.
+    // The epoch has switched and this ID has qualified: its last accepted solution within the prediction threshold is its predicting network.
     bool predicting = false;
     unsigned int maxSubmitAge = 0;          // worst anchor age (ticks) among submitted solutions, vs freshnessWindow
     auto lastResolveTime = std::chrono::steady_clock::now();
